@@ -2,12 +2,11 @@ import { openai, CHAT_MODEL } from './openai';
 
 export interface CompanyProfile {
   key: string;
-  summary: string; // what the company does
-  sector: string;  // best-guess industry
-  ok: boolean;     // true if we actually read the site
+  summary: string;
+  sector: string;
+  ok: boolean;
 }
 
-// Same company across many rows? Profile once.
 const cache = new Map<string, CompanyProfile>();
 
 function domainOf(website: string, name: string): string {
@@ -44,6 +43,28 @@ async function fetchText(url: string): Promise<string> {
   }
 }
 
+async function summarize(user: string, sys: string): Promise<{ summary: string; sector: string }> {
+  try {
+    const r = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `${sys} Return ONLY JSON.` },
+        {
+          role: 'user',
+          content:
+            `${user}\n\nReturn JSON: {"summary":"<=40 words: what they do / most likely do, products, who they serve",` +
+            `"sector":"<short industry label, e.g. Reinsurance, Microfinance, EdTech, Higher Education, Semiconductors>"}`,
+        },
+      ],
+    });
+    return JSON.parse(r.choices[0].message.content || '{}');
+  } catch {
+    return { summary: '', sector: '' };
+  }
+}
+
 export async function profileCompany(name: string, website: string): Promise<CompanyProfile> {
   const key = domainOf(website, name);
   if (cache.has(key)) return cache.get(key)!;
@@ -59,25 +80,19 @@ export async function profileCompany(name: string, website: string): Promise<Com
 
   let profile: CompanyProfile;
   if (text.length > 200) {
-    const r = await openai.chat.completions.create({
-      model: CHAT_MODEL,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You read a company website and summarize what the company actually does. Return ONLY JSON.' },
-        {
-          role: 'user',
-          content:
-            `COMPANY: ${name}\nWEBSITE TEXT:\n${text}\n\n` +
-            `Return JSON: {"summary":"<=40 words: what they do, products, who they serve","sector":"<short industry label e.g. Reinsurance, SaaS, Medical Devices>"}`,
-        },
-      ],
-    });
-    let j: any = {};
-    try { j = JSON.parse(r.choices[0].message.content || '{}'); } catch { /* empty */ }
+    // Read the real site.
+    const j = await summarize(
+      `COMPANY: ${name}\nWEBSITE TEXT:\n${text}`,
+      'You read a company website and summarize what the company actually does.'
+    );
     profile = { key, summary: j.summary || name, sector: j.sector || '', ok: true };
   } else {
-    profile = { key, summary: name, sector: '', ok: false };
+    // Site unreadable -> infer from the name + domain using world knowledge.
+    const j = await summarize(
+      `COMPANY NAME: ${name}\nDOMAIN: ${domain || 'unknown'}\nThe website could not be read; infer the most likely business.`,
+      'You infer what a company most likely does from its name and domain. If unsure, give your best guess and a broad sector — never leave it blank.'
+    );
+    profile = { key, summary: j.summary || name, sector: j.sector || '', ok: false };
   }
 
   cache.set(key, profile);
