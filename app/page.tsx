@@ -4,28 +4,19 @@ import { useState } from 'react';
 import Papa from 'papaparse';
 
 type Prospect = Record<string, string>;
-type ReportMatch = {
-  report: { id: string; title: string; url: string };
-  score: number;
-  rationale: string;
+type Best = {
+  report: { id: string; title: string; url: string } | null;
+  confidence: number;
+  reasoning: string;
+  companyProfile: string;
+  sector: string;
 };
-type Row = {
-  prospect: Prospect;
-  matches: ReportMatch[];
-  verification?: {
-    status: 'still_there' | 'likely_left' | 'unknown';
-    confidence: number;
-    currentCompany?: string;
-    currentTitle?: string;
-  };
-  previousCompanyMatches?: ReportMatch[];
-  error?: string;
-};
+type Row = { prospect: Prospect; best: Best | null; error?: string };
 
 const SAMPLE = `email,first_name,last_name,company_name,phone_number,website,linkedin_profile,location
-steven_hunter@swissre.com,Steven,Hunter,Swiss Re,,swissre.com,linkedin.com/in/steven-hunter-9b6b1021,Japan`;
+steven_hunter@swissre.com,Steven,Hunter,Swiss Re,,swissre.com,linkedin.com/in/steven-hunter,Japan`;
 
-const CHUNK = 3; // small batches keep each request under Vercel's function timeout
+const CHUNK = 2; // heavier pipeline (website + 2 model calls per row) -> small batches
 
 function parseRows(text: string): Prospect[] {
   const delimiter = text.includes('\t') ? '\t' : ',';
@@ -33,10 +24,11 @@ function parseRows(text: string): Prospect[] {
   return out.data;
 }
 
-const badgeClass = (s?: string) =>
-  s === 'still_there' ? 'b-still' : s === 'likely_left' ? 'b-left' : 'b-unknown';
-const badgeText = (s?: string) =>
-  s === 'still_there' ? 'still there' : s === 'likely_left' ? 'likely left' : 'unknown';
+const get = (p: Prospect, ...keys: string[]) => {
+  for (const k of keys) if (p[k]) return p[k];
+  return '';
+};
+const confClass = (c: number) => (c >= 75 ? 'b-still' : c >= 50 ? 'b-left' : 'b-unknown');
 
 export default function Page() {
   const [text, setText] = useState(SAMPLE);
@@ -44,12 +36,7 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
 
-  function normalizeEnrich(r: any): Row {
-    const { matches, verification, previousCompanyMatches, ...prospect } = r;
-    return { prospect, matches, verification, previousCompanyMatches };
-  }
-
-  async function run(endpoint: 'match' | 'enrich') {
+  async function run() {
     setErr('');
     setLoading(true);
     setRows([]);
@@ -59,22 +46,18 @@ export default function Page() {
       const all: Row[] = [];
       for (let i = 0; i < prospects.length; i += CHUNK) {
         const batch = prospects.slice(i, i + CHUNK);
-        const res = await fetch(`/api/${endpoint}`, {
+        const res = await fetch('/api/match', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prospects: batch }),
         });
         const body = await res.text();
         let data: any;
-        try {
-          data = JSON.parse(body);
-        } catch {
-          throw new Error(`Server returned a non-JSON error (HTTP ${res.status}): ${body.slice(0, 200)}`);
-        }
+        try { data = JSON.parse(body); }
+        catch { throw new Error(`Server returned a non-JSON error (HTTP ${res.status}): ${body.slice(0, 200)}`); }
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-        const got: Row[] = endpoint === 'enrich' ? data.results.map(normalizeEnrich) : data.results;
-        all.push(...got);
-        setRows([...all]); // show progress as each batch finishes
+        all.push(...(data.results as Row[]));
+        setRows([...all]);
       }
     } catch (e: any) {
       setErr(e.message);
@@ -93,18 +76,16 @@ export default function Page() {
 
   function downloadCsv() {
     const flat = rows.map((r) => ({
-      first_name: r.prospect.first_name || r.prospect.firstName || '',
-      last_name: r.prospect.last_name || r.prospect.lastName || '',
-      company: r.prospect.company_name || r.prospect.companyName || '',
-      email: r.prospect.email || '',
-      status: r.verification ? badgeText(r.verification.status) : '',
-      report1: r.matches[0]?.report.title || '',
-      report1Url: r.matches[0]?.report.url || '',
-      report1Score: r.matches[0]?.score ?? '',
-      report2: r.matches[1]?.report.title || '',
-      report2Url: r.matches[1]?.report.url || '',
-      report3: r.matches[2]?.report.title || '',
-      report3Url: r.matches[2]?.report.url || '',
+      first_name: get(r.prospect, 'first_name', 'firstName'),
+      last_name: get(r.prospect, 'last_name', 'lastName'),
+      company: get(r.prospect, 'company_name', 'companyName'),
+      email: get(r.prospect, 'email'),
+      company_profile: r.best?.companyProfile || '',
+      sector: r.best?.sector || '',
+      best_report: r.best?.report?.title || '',
+      report_url: r.best?.report?.url || '',
+      confidence: r.best?.confidence ?? '',
+      reasoning: r.best?.reasoning || '',
     }));
     const csv = Papa.unparse(flat);
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -118,26 +99,21 @@ export default function Page() {
     <div className="wrap">
       <h1>Prospect → Report Matcher</h1>
       <p className="sub">
-        Paste your prospect sheet (with the header row). Any column names work. Match suggests
-        reports; Verify + Match also checks whether the lead is still at the company.
+        Paste your sheet (any column names). For each lead it profiles the company from its website,
+        weighs the role, and picks the single best report with a confidence score.
       </p>
 
       <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
 
       <div className="row">
-        <button disabled={loading} onClick={() => run('match')}>
-          {loading ? 'Working…' : 'Match reports'}
-        </button>
-        <button className="secondary" disabled={loading} onClick={() => run('enrich')}>
-          {loading ? 'Working…' : 'Verify + match'}
+        <button disabled={loading} onClick={run}>
+          {loading ? 'Researching…' : 'Find best report'}
         </button>
         <label className="muted" style={{ cursor: 'pointer' }}>
           or upload CSV <input type="file" accept=".csv,.tsv,.txt" onChange={onFile} hidden />
         </label>
         {rows.length > 0 && (
-          <button className="secondary" onClick={downloadCsv}>
-            Download CSV
-          </button>
+          <button className="secondary" onClick={downloadCsv}>Download CSV</button>
         )}
       </div>
 
@@ -148,8 +124,8 @@ export default function Page() {
           <thead>
             <tr>
               <th>Prospect</th>
-              <th>Status</th>
-              <th>Suggested reports</th>
+              <th>Company (researched)</th>
+              <th>Best report</th>
             </tr>
           </thead>
           <tbody>
@@ -157,39 +133,26 @@ export default function Page() {
               <tr key={i}>
                 <td>
                   <strong>
-                    {(r.prospect.first_name || r.prospect.firstName || '')}{' '}
-                    {(r.prospect.last_name || r.prospect.lastName || '')}
+                    {get(r.prospect, 'first_name', 'firstName')} {get(r.prospect, 'last_name', 'lastName')}
                   </strong>
-                  <div className="muted">{r.prospect.title || ''}</div>
-                  <div className="muted">{r.prospect.company_name || r.prospect.companyName || ''}</div>
+                  <div className="muted">{get(r.prospect, 'title')}</div>
+                  <div className="muted">{get(r.prospect, 'company_name', 'companyName')}</div>
                 </td>
                 <td>
-                  {r.verification ? (
-                    <>
-                      <span className={`badge ${badgeClass(r.verification.status)}`}>
-                        {badgeText(r.verification.status)}
-                      </span>
-                      {r.verification.currentCompany && (
-                        <div className="muted" style={{ marginTop: 4 }}>
-                          → {r.verification.currentCompany}
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
+                  <div>{r.best?.companyProfile || '—'}</div>
+                  {r.best?.sector && <div className="muted" style={{ marginTop: 4 }}>{r.best.sector}</div>}
                 </td>
                 <td>
                   {r.error && <span style={{ color: '#b91c1c' }}>{r.error}</span>}
-                  {r.matches.map((m, j) => (
-                    <div className="report" key={j}>
-                      <a href={m.report.url} target="_blank" rel="noreferrer">
-                        {m.report.title}
-                      </a>{' '}
-                      <span className="score">({m.score})</span>
-                      {m.rationale && <div className="why">{m.rationale}</div>}
+                  {r.best?.report ? (
+                    <div className="report">
+                      <a href={r.best.report.url} target="_blank" rel="noreferrer">{r.best.report.title}</a>{' '}
+                      <span className={`badge ${confClass(r.best.confidence)}`}>{r.best.confidence}%</span>
+                      {r.best.reasoning && <div className="why">{r.best.reasoning}</div>}
                     </div>
-                  ))}
+                  ) : (
+                    !r.error && <span className="muted">No strong match</span>
+                  )}
                 </td>
               </tr>
             ))}
