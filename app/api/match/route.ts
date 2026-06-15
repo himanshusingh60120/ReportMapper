@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { matchProspect } from '@/lib/match';
+import { bestReportFor } from '@/lib/match';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
-    const { prospects, topN = 3 } = await req.json();
+    const { prospects } = await req.json();
     const list: Record<string, any>[] = Array.isArray(prospects) ? prospects : [prospects];
     const results = await Promise.all(
       list.map(async (p) => {
         try {
-          return { prospect: p, matches: await matchProspect(p, topN) };
+          return { prospect: p, best: await bestReportFor(p) };
         } catch (e: any) {
-          return { prospect: p, matches: [], error: e.message };
+          return { prospect: p, best: null, error: e.message };
         }
       })
     );
