@@ -47,7 +47,7 @@ export function normalizeProspect(raw: Record<string, any>): Partial<Prospect> {
 
 export interface BestMatch {
   report: { id: string; title: string; url: string } | null;
-  confidence: number; // 0-100
+  confidence: number;
   reasoning: string;
   companyProfile: string;
   sector: string;
@@ -61,7 +61,6 @@ function roleText(p: Partial<Prospect>): string {
   );
 }
 
-// Embedding query is built from the company's ACTUAL business + role + location.
 async function shortlist(
   p: Partial<Prospect>,
   profile: CompanyProfile,
@@ -85,7 +84,7 @@ async function shortlist(
     .slice(0, k);
 }
 
-// Pick the SINGLE best report with an honest confidence + reasoning.
+// Always returns the closest report; confidence reflects how strong the fit is.
 async function pickBest(
   p: Partial<Prospect>,
   profile: CompanyProfile,
@@ -93,10 +92,10 @@ async function pickBest(
 ): Promise<BestMatch> {
   const list = cands.map((c, i) => `${i + 1}. ${c.report.title}`).join('\n');
   const sys =
-    'You are a B2B research analyst. From the candidate market-research reports, choose the SINGLE one most worth ' +
-    "pitching to this buyer, based on what their company does and the person's role. Give an HONEST confidence: " +
-    'high only when the fit is strong and obvious; low when the data is thin or nothing fits well. ' +
-    'If no candidate is relevant, return n=0. Return ONLY JSON.';
+    'You are a B2B research analyst. From the candidate market-research reports, pick the SINGLE closest one to ' +
+    "pitch to this buyer, based on what their company does and the person's role. ALWAYS choose the closest match — " +
+    'never refuse. Set confidence to reflect fit: 80-100 for an obvious fit, 50-79 for a reasonable adjacency, ' +
+    '1-49 when only loosely related. Return ONLY JSON.';
   const user =
     `COMPANY: ${p.companyName || 'unknown'}\n` +
     `WHAT THEY DO: ${profile.summary}\n` +
@@ -104,7 +103,7 @@ async function pickBest(
     `PERSON ROLE: ${roleText(p)}\n` +
     `LOCATION: ${p.country || 'unknown'}\n\n` +
     `CANDIDATE REPORTS:\n${list}\n\n` +
-    `Return JSON: {"n":<best candidate number, 0 if none fit>,"confidence":<0-100>,"reasoning":"<=40 words on why this report fits this company and role"}`;
+    `Return JSON: {"n":<closest candidate number 1-${cands.length}>,"confidence":<0-100>,"reasoning":"<=40 words why this is the closest fit"}`;
 
   const r = await openai.chat.completions.create({
     model: CHAT_MODEL,
@@ -118,32 +117,27 @@ async function pickBest(
 
   let j: any = {};
   try { j = JSON.parse(r.choices[0].message.content || '{}'); } catch { /* empty */ }
-  const c = cands[(j.n || 0) - 1];
+  const idx = Number.isInteger(j.n) && j.n >= 1 && j.n <= cands.length ? j.n - 1 : 0; // fall back to top similarity
+  const c = cands[idx];
   return {
-    report: c ? { id: c.report.id, title: c.report.title, url: c.report.url } : null,
+    report: { id: c.report.id, title: c.report.title, url: c.report.url },
     confidence:
-      typeof j.confidence === 'number'
-        ? Math.max(0, Math.min(100, j.confidence))
-        : c
-        ? Math.round(c.similarity * 100)
-        : 0,
-    reasoning: j.reasoning || (c ? '' : 'No report in the catalog is a clear fit.'),
+      typeof j.confidence === 'number' ? Math.max(0, Math.min(100, j.confidence)) : Math.round(c.similarity * 100),
+    reasoning: j.reasoning || 'Closest available report by topic.',
     companyProfile: profile.summary,
     sector: profile.sector,
   };
 }
 
-// MAIN: full background check -> single best report.
 export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   const cands = await shortlist(p, profile, 25);
   if (!cands.length)
-    return { report: null, confidence: 0, reasoning: 'No catalog candidates.', companyProfile: profile.summary, sector: profile.sector };
+    return { report: null, confidence: 0, reasoning: 'Catalog is empty.', companyProfile: profile.summary, sector: profile.sector };
   return pickBest(p, profile, cands);
 }
 
-// Kept for the verify+match route (returns top-N by similarity, profile-aware).
 export async function matchProspect(raw: Record<string, any>, topN = 3): Promise<ReportMatch[]> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
