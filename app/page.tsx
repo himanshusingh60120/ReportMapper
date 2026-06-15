@@ -22,16 +22,14 @@ type Row = {
   error?: string;
 };
 
-const SAMPLE = `firstName\tlastName\ttitle\tcompanyName\tcompanyWebsite\tdepartment\tlevel\tindustry\tsubIndustry\tcountry\temail\tlinkedin
-Steven\tHunter\tHead of Pricing L and H Japan\tSwiss Re\tswissre.com\tFinance & Administration\tStaff\tFinancial Services\tInsurance\tJapan\tsteven_hunter@swissre.com\tlinkedin.com/in/steven-hunter-9b6b1021`;
+const SAMPLE = `email,first_name,last_name,company_name,phone_number,website,linkedin_profile,location
+steven_hunter@swissre.com,Steven,Hunter,Swiss Re,,swissre.com,linkedin.com/in/steven-hunter-9b6b1021,Japan`;
+
+const CHUNK = 3; // small batches keep each request under Vercel's function timeout
 
 function parseRows(text: string): Prospect[] {
   const delimiter = text.includes('\t') ? '\t' : ',';
-  const out = Papa.parse<Prospect>(text.trim(), {
-    header: true,
-    delimiter,
-    skipEmptyLines: true,
-  });
+  const out = Papa.parse<Prospect>(text.trim(), { header: true, delimiter, skipEmptyLines: true });
   return out.data;
 }
 
@@ -46,32 +44,43 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
 
+  function normalizeEnrich(r: any): Row {
+    const { matches, verification, previousCompanyMatches, ...prospect } = r;
+    return { prospect, matches, verification, previousCompanyMatches };
+  }
+
   async function run(endpoint: 'match' | 'enrich') {
     setErr('');
     setLoading(true);
     setRows([]);
     try {
       const prospects = parseRows(text);
-      if (!prospects.length) throw new Error('No rows parsed — check your headers.');
-      const res = await fetch(`/api/${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prospects }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      // /api/enrich returns flat rows; /api/match returns {prospect, matches}
-      setRows(endpoint === 'enrich' ? data.results.map(normalizeEnrich) : data.results);
+      if (!prospects.length) throw new Error('No rows parsed — check your header row.');
+      const all: Row[] = [];
+      for (let i = 0; i < prospects.length; i += CHUNK) {
+        const batch = prospects.slice(i, i + CHUNK);
+        const res = await fetch(`/api/${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prospects: batch }),
+        });
+        const body = await res.text();
+        let data: any;
+        try {
+          data = JSON.parse(body);
+        } catch {
+          throw new Error(`Server returned a non-JSON error (HTTP ${res.status}): ${body.slice(0, 200)}`);
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        const got: Row[] = endpoint === 'enrich' ? data.results.map(normalizeEnrich) : data.results;
+        all.push(...got);
+        setRows([...all]); // show progress as each batch finishes
+      }
     } catch (e: any) {
       setErr(e.message);
     } finally {
       setLoading(false);
     }
-  }
-
-  function normalizeEnrich(r: any): Row {
-    const { matches, verification, previousCompanyMatches, ...prospect } = r;
-    return { prospect, matches, verification, previousCompanyMatches };
   }
 
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -84,12 +93,11 @@ export default function Page() {
 
   function downloadCsv() {
     const flat = rows.map((r) => ({
-      firstName: r.prospect.firstName,
-      lastName: r.prospect.lastName,
-      company: r.prospect.companyName,
-      title: r.prospect.title,
+      first_name: r.prospect.first_name || r.prospect.firstName || '',
+      last_name: r.prospect.last_name || r.prospect.lastName || '',
+      company: r.prospect.company_name || r.prospect.companyName || '',
+      email: r.prospect.email || '',
       status: r.verification ? badgeText(r.verification.status) : '',
-      currentCompany: r.verification?.currentCompany || '',
       report1: r.matches[0]?.report.title || '',
       report1Url: r.matches[0]?.report.url || '',
       report1Score: r.matches[0]?.score ?? '',
@@ -110,7 +118,7 @@ export default function Page() {
     <div className="wrap">
       <h1>Prospect → Report Matcher</h1>
       <p className="sub">
-        Paste your prospect sheet (tab- or comma-separated, with the header row). Match suggests
+        Paste your prospect sheet (with the header row). Any column names work. Match suggests
         reports; Verify + Match also checks whether the lead is still at the company.
       </p>
 
@@ -149,10 +157,11 @@ export default function Page() {
               <tr key={i}>
                 <td>
                   <strong>
-                    {r.prospect.firstName} {r.prospect.lastName}
+                    {(r.prospect.first_name || r.prospect.firstName || '')}{' '}
+                    {(r.prospect.last_name || r.prospect.lastName || '')}
                   </strong>
-                  <div className="muted">{r.prospect.title}</div>
-                  <div className="muted">{r.prospect.companyName}</div>
+                  <div className="muted">{r.prospect.title || ''}</div>
+                  <div className="muted">{r.prospect.company_name || r.prospect.companyName || ''}</div>
                 </td>
                 <td>
                   {r.verification ? (
