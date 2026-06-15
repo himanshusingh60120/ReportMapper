@@ -14,7 +14,16 @@ export function loadCatalog(): ReportItem[] {
       'data/catalog.json missing. Run: node scripts/build-catalog.mjs (needs OPENAI_API_KEY)'
     );
   }
-  CATALOG = JSON.parse(fs.readFileSync(p, 'utf8')) as ReportItem[];
+  const raw = fs.readFileSync(p, 'utf8').trim();
+  if (!raw) {
+    throw new Error(
+      'data/catalog.json is empty. Run: node scripts/build-catalog.mjs to populate it, then commit it.'
+    );
+  }
+  CATALOG = JSON.parse(raw) as ReportItem[];
+  if (!CATALOG.length || !CATALOG[0].embedding) {
+    throw new Error('data/catalog.json has no embedded reports. Re-run scripts/build-catalog.mjs.');
+  }
   return CATALOG;
 }
 
@@ -39,7 +48,8 @@ export async function shortlist(
   k = 25
 ): Promise<{ report: ReportItem; similarity: number }[]> {
   const cat = loadCatalog();
-  const [qv] = await embed([prospectQuery(p)]);
+  const dims = cat[0]?.embedding?.length; // match whatever dims the catalog was built at
+  const [qv] = await embed([prospectQuery(p)], dims);
   return cat
     .map((r) => ({ report: r, similarity: cosine(qv, r.embedding as number[]) }))
     .sort((a, b) => b.similarity - a.similarity)
