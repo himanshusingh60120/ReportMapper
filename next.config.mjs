@@ -1,8 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // catalog.json is read at runtime via fs; ensure it ships with the build.
-  outputFileTracingIncludes: {
-    '/api/**': ['./data/**'],
+  experimental: {
+    // catalog.json is read at runtime via fs; force it into the serverless function bundle.
+    outputFileTracingIncludes: {
+      '/api/**': ['./data/**'],
+    },
   },
 };
 
