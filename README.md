@@ -8,32 +8,53 @@ Built for Vercel + the OpenAI API.
 
 ## How it works
 
+The matcher is **two-stage**: it first decides *which of the 12 Kings Research industries* the
+prospect's company belongs to, then digs for the best report **inside that one bucket** — never
+across the whole 3k catalog. This mirrors how a human analyst works ("Accenture is an IT /
+consulting firm → look in ICT-IOT → pick the report") and is the single biggest precision win.
+
 ```
 Prospect CSV ─┐
-              ├─►  Shortlist (embeddings, top 25)  ─►  Re-rank + explain (GPT, top 3)  ─►
-Report catalog┘                                                                          │
-(sitemap → vectors, built once)                                                          ▼
-                                          Verify employment (boolean SERP + email)
-                                               │                         │
-                                       still at company            left company
-                                       (keep reports)          (swap employer, re-match)
-                                               └────────────┬────────────┘
-                                                            ▼
-                                                   Enriched CSV out
+              │   ┌─ 1. Profile company (GPT: what does it do?)
+              ├─► ├─ 2. Classify into ONE of the 12 industries  ──┐
+Report catalog┘   └─ 3. Shortlist (embeddings) ── within bucket ◄─┘
+(sitemap → category-tagged                │
+ vectors, built once)                     ▼
+                              4. Re-rank + explain (GPT, top 3)
+                                          │
+                              5. Verify employment (boolean SERP + email)
+                                   │                         │
+                           still at company            left company
+                           (keep reports)          (swap employer, re-match)
+                                   └────────────┬────────────┘
+                                                ▼
+                          Enriched CSV out  (+ industry + industry_reason columns)
 ```
 
 1. **Catalog build (once, then nightly):** `scripts/build-catalog.mjs` fetches the gzipped
-   reports sitemap (~3,000 reports), derives a clean title from each report slug, embeds the
-   titles, and writes `data/catalog.json`.
-2. **Shortlist:** each prospect row becomes a query (industry + sub-industry + company + role).
-   We embed it and take the top 25 reports by cosine similarity — cheap and scalable over 3k reports.
-3. **Re-rank:** GPT scores those 25 against the buyer and returns the best 3 with a one-line
+   reports sitemap (~3,000 reports), derives a clean title from each report slug, **crawls the 12
+   industry category pages to tag each report with its industry**, embeds the titles, and writes
+   `data/catalog.json`. Reports the crawl doesn't reach are tagged by **nearest-industry embedding**,
+   so every report always carries an `industry`.
+2. **Profile + classify:** each prospect's company is profiled by GPT (one line on what it does),
+   then classified into exactly **one** of the 12 industries. A constrained GPT JSON call is the
+   primary classifier; a nearest-industry embedding is the backstop if the model returns something
+   off-menu. Free-text aliases are normalised here (e.g. *consulting / software / IT → ICT-IOT*,
+   *insurance / fintech → BFSI*, *pharma → Healthcare…*).
+3. **Shortlist (within bucket):** the report catalog is **hard-filtered to the chosen industry**,
+   then the prospect query (industry + sub-industry + company + role) is embedded and the top 25
+   reports by cosine similarity are kept. (If a bucket were ever empty, it safely falls back to the
+   full catalog.)
+4. **Re-rank:** GPT scores those 25 against the buyer and returns the best 3 with a one-line
    reason. Only 25 titles go in the prompt, so cost per prospect stays tiny.
-4. **Verify (optional):** runs a Boolean query — `"First Last" "Company" ("Title")` — through a
+5. **Verify (optional):** runs a Boolean query — `"First Last" "Company" ("Title")` — through a
    **search-engine API** and lets GPT judge `still_there / likely_left / unknown`, extracting a
    new employer when the person has clearly moved.
-5. **Re-match on move:** if they left and a new company is found, we re-run matching on the new
-   employer and keep the old suggestion for reference.
+6. **Re-match on move:** if they left and a new company is found, we re-run the full classify →
+   match pipeline on the new employer and keep the old suggestion for reference.
+
+The chosen industry and the model's one-line reason for it are surfaced in the results table and
+**exported as `industry` and `industry_reason` columns** in the CSV.
 
 ## Setup
 
@@ -43,6 +64,16 @@ cp .env.example .env.local        # add OPENAI_API_KEY (+ SERPAPI_KEY for verifi
 npm run build:catalog             # writes data/catalog.json (needs OPENAI_API_KEY)
 npm run dev                       # http://localhost:3000
 ```
+
+> **Re-run `npm run build:catalog` after pulling this change** — the catalog now carries an
+> `industry` field per report, and an older `data/catalog.json` won't have it.
+
+The catalog build accepts two optional env vars:
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `CRAWL_INDUSTRIES` | `1` | Set to `0` to skip the category-page crawl and tag **every** report by embedding only (faster build, slightly less authoritative). |
+| `MAX_CATEGORY_PAGES` | `60` | Pagination ceiling per category page; the crawl stops early once a page adds no new report IDs. |
 
 Paste your sheet (the exact headers below, tab- or comma-separated) and click **Match reports**
 or **Verify + match**.
@@ -75,14 +106,17 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
 
 ## Tuning accuracy
 
-- **Tag reports by industry.** Titles alone match well, but crawling the 12 `/reports/{industry}`
-  category pages to attach an industry label per report lets you hard-filter the shortlist to the
-  buyer's bucket (e.g. BFSI) before re-ranking. Biggest single precision win.
+- **Industry bucketing (implemented).** Every report is tagged with one of the 12 industries at
+  build time — authoritatively by crawling the `/reports/{industry}-{n}` category pages, with a
+  nearest-embedding fallback for any the crawl misses. At query time the company is classified into
+  one bucket and the shortlist is **hard-filtered** to it before re-ranking. The 12 industries live
+  in `data/industries.json` (the single source of truth); tweak their descriptions/keywords there to
+  steer classification. Aliases (e.g. *consulting → ICT-IOT*) live in `lib/industries.ts`.
 - **Shortlist size (`k`).** Raise to 40 for broad roles, drop to 15 for niche ones.
 - **Embed richer text.** Optionally fetch each report's full "By segment" title for more signal
   (costs more at build time, not at query time).
-- **Model.** `gpt-4o-mini` is plenty for re-ranking; switch `CHAT_MODEL` to a stronger model only
-  if rationales feel thin.
+- **Model.** `gpt-4o-mini` is plenty for re-ranking and classification; switch `CHAT_MODEL` to a
+  stronger model only if rationales feel thin.
 
 ## Cost (rough, OpenAI list prices)
 
@@ -93,12 +127,15 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
 ## Files
 
 ```
+data/industries.json   the 12 Kings Research industries (source of truth: names, urls, keywords)
+lib/industries.ts      industry menu + tolerant resolver (aliases, ids, slugs → canonical name)
 lib/catalog.ts   sitemap → report list (gzip + sitemap-index aware)
 lib/openai.ts    OpenAI client, embeddings, cosine
-lib/match.ts     shortlist + GPT re-rank
+lib/match.ts     classify industry → filter to bucket → shortlist + GPT re-rank
 lib/verify.ts    boolean SERP query + GPT employment judgment (pluggable)
 app/api/match    POST prospects → report matches
 app/api/enrich   POST prospects → verify + (re)match
-app/page.tsx     paste/upload UI, results table, CSV download
-scripts/build-catalog.mjs   builds data/catalog.json
+app/page.tsx     paste/upload UI, results table (+ industry badge), CSV download
+scripts/build-catalog.mjs   builds data/catalog.json (sitemap + category crawl + industry tagging)
+scripts/test-logic.mjs      offline regression tests for the build/match helpers
 ```
