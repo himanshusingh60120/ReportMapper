@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ReportItem, ReportMatch, Prospect } from './types';
 import { embed, cosine, openai, CHAT_MODEL } from './openai';
 import { profileCompany, CompanyProfile } from './profile';
+import { INDUSTRIES, industryMenu, resolveIndustry, type Industry } from './industries';
 
 let CATALOG: ReportItem[] | null = null;
 
@@ -51,6 +52,8 @@ export interface BestMatch {
   reasoning: string;
   companyProfile: string;
   sector: string;
+  industry: string;        // one of the 12 canonical industries the prospect was bucketed into
+  industryReason: string;  // short note on why that bucket was chosen
 }
 
 function roleText(p: Partial<Prospect>): string {
@@ -64,10 +67,20 @@ function roleText(p: Partial<Prospect>): string {
 async function shortlist(
   p: Partial<Prospect>,
   profile: CompanyProfile,
-  k = 25
+  k = 25,
+  industryName?: string
 ): Promise<{ report: ReportItem; similarity: number }[]> {
   const cat = loadCatalog();
   const dims = cat[0]?.embedding?.length;
+
+  // Hard-filter to the prospect's industry bucket first ("fix the domain, then dig in").
+  // Only scope down when the bucket actually has reports, so we never return nothing.
+  let pool = cat;
+  if (industryName) {
+    const inBucket = cat.filter((r) => r.industry === industryName);
+    if (inBucket.length > 0) pool = inBucket;
+  }
+
   const q = [
     profile.summary && `Company does: ${profile.summary}`,
     profile.sector && `Sector: ${profile.sector}`,
@@ -78,17 +91,108 @@ async function shortlist(
     .filter(Boolean)
     .join('. ');
   const [qv] = await embed([q || p.companyName || 'business report'], dims);
-  return cat
+  return pool
     .map((r) => ({ report: r, similarity: cosine(qv, r.embedding as number[]) }))
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, k);
+}
+
+// --- Industry classification ("fix the domain first") -----------------------
+// Map the prospect's company to exactly one of the 12 fixed Kings Research
+// industries before any report matching happens. Primary path is a constrained
+// GPT call; if that fails we fall back to nearest industry by embedding so the
+// step is never a hard dependency on the model returning clean JSON.
+
+let INDUSTRY_VECS: { industry: Industry; vec: number[] }[] | null = null;
+
+async function industryVectors(dims?: number) {
+  if (INDUSTRY_VECS) return INDUSTRY_VECS;
+  const texts = INDUSTRIES.map(
+    (i) => `${i.name}. ${i.description} Keywords: ${i.keywords.join(', ')}.`
+  );
+  const vecs = await embed(texts, dims);
+  INDUSTRY_VECS = INDUSTRIES.map((industry, i) => ({ industry, vec: vecs[i] }));
+  return INDUSTRY_VECS;
+}
+
+async function nearestIndustryByEmbedding(text: string, dims?: number): Promise<Industry> {
+  const ivs = await industryVectors(dims);
+  const [qv] = await embed([text || 'business'], dims);
+  let best = ivs[0];
+  let bestSim = -Infinity;
+  for (const iv of ivs) {
+    const s = cosine(qv, iv.vec);
+    if (s > bestSim) {
+      bestSim = s;
+      best = iv;
+    }
+  }
+  return best.industry;
+}
+
+export interface IndustryPick {
+  industry: Industry;
+  reason: string;
+}
+
+export async function classifyIndustry(
+  p: Partial<Prospect>,
+  profile: CompanyProfile
+): Promise<IndustryPick> {
+  const ctx = [
+    p.companyName && `Company: ${p.companyName}`,
+    profile.summary && `What they do: ${profile.summary}`,
+    profile.sector && `Sector guess: ${profile.sector}`,
+    p.industry && `Self-reported industry: ${p.industry}`,
+    p.subIndustry && `Self-reported sub-industry: ${p.subIndustry}`,
+    p.title && `Contact role: ${p.title}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  // Primary: constrained GPT classification into one of the 12 buckets.
+  try {
+    const sys =
+      'You are a B2B market-research analyst. Map the company to EXACTLY ONE of the 12 industry ' +
+      'buckets listed. Pick the single best fit based on what the company sells/does — never invent a ' +
+      'new category and never refuse. Return ONLY JSON.';
+    const user =
+      `INDUSTRY BUCKETS:\n${industryMenu()}\n\n` +
+      `COMPANY:\n${ctx || 'unknown'}\n\n` +
+      `Return JSON: {"id":<bucket number 1-12>,"name":"<exact bucket name>","reason":"<=20 words why"}`;
+    const r = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: user },
+      ],
+    });
+    const j = JSON.parse(r.choices[0].message.content || '{}');
+    const byId = Number.isInteger(j.id) ? INDUSTRIES.find((i) => i.id === j.id) : null;
+    const resolved = byId || resolveIndustry(j.name);
+    if (resolved) {
+      return { industry: resolved, reason: typeof j.reason === 'string' ? j.reason : '' };
+    }
+  } catch {
+    /* fall through to the embedding backstop */
+  }
+
+  // Backstop: nearest bucket by embedding of the company description.
+  const text = [profile.summary, profile.sector, p.industry, p.subIndustry, p.companyName]
+    .filter(Boolean)
+    .join('. ');
+  const industry = await nearestIndustryByEmbedding(text);
+  return { industry, reason: 'Nearest industry by semantic similarity (model fallback).' };
 }
 
 // Always returns the closest report; confidence reflects how strong the fit is.
 async function pickBest(
   p: Partial<Prospect>,
   profile: CompanyProfile,
-  cands: { report: ReportItem; similarity: number }[]
+  cands: { report: ReportItem; similarity: number }[],
+  pick: IndustryPick
 ): Promise<BestMatch> {
   const list = cands.map((c, i) => `${i + 1}. ${c.report.title}`).join('\n');
   const sys =
@@ -100,9 +204,10 @@ async function pickBest(
     `COMPANY: ${p.companyName || 'unknown'}\n` +
     `WHAT THEY DO: ${profile.summary}\n` +
     `SECTOR: ${profile.sector || 'unknown'}\n` +
+    `INDUSTRY BUCKET: ${pick.industry.name}\n` +
     `PERSON ROLE: ${roleText(p)}\n` +
     `LOCATION: ${p.country || 'unknown'}\n\n` +
-    `CANDIDATE REPORTS:\n${list}\n\n` +
+    `CANDIDATE REPORTS (all within ${pick.industry.name}):\n${list}\n\n` +
     `Return JSON: {"n":<closest candidate number 1-${cands.length}>,"confidence":<0-100>,"reasoning":"<=40 words why this is the closest fit"}`;
 
   const r = await openai.chat.completions.create({
@@ -126,22 +231,36 @@ async function pickBest(
     reasoning: j.reasoning || 'Closest available report by topic.',
     companyProfile: profile.summary,
     sector: profile.sector,
+    industry: pick.industry.name,
+    industryReason: pick.reason,
   };
 }
 
 export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
-  const cands = await shortlist(p, profile, 25);
+  // 1) Fix the domain: bucket the company into one of the 12 industries.
+  const pick = await classifyIndustry(p, profile);
+  // 2) Dig deeper: shortlist + re-rank reports *within* that bucket only.
+  const cands = await shortlist(p, profile, 25, pick.industry.name);
   if (!cands.length)
-    return { report: null, confidence: 0, reasoning: 'Catalog is empty.', companyProfile: profile.summary, sector: profile.sector };
-  return pickBest(p, profile, cands);
+    return {
+      report: null,
+      confidence: 0,
+      reasoning: 'Catalog is empty.',
+      companyProfile: profile.summary,
+      sector: profile.sector,
+      industry: pick.industry.name,
+      industryReason: pick.reason,
+    };
+  return pickBest(p, profile, cands, pick);
 }
 
 export async function matchProspect(raw: Record<string, any>, topN = 3): Promise<ReportMatch[]> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
-  const cands = await shortlist(p, profile, 25);
+  const pick = await classifyIndustry(p, profile);
+  const cands = await shortlist(p, profile, 25, pick.industry.name);
   return cands.slice(0, topN).map((c) => ({
     report: { id: c.report.id, title: c.report.title, url: c.report.url },
     score: Math.round(c.similarity * 100),
