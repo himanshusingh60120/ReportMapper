@@ -12,6 +12,8 @@ type Best = {
   sector: string;
   industry: string;
   industryReason?: string;
+  personFunction?: string;
+  personProfile?: string;
 };
 type Row = { prospect: Prospect; best: Best | null; error?: string };
 
@@ -40,6 +42,8 @@ function buildCsv(data: Row[]): string {
     email: get(r.prospect, 'email'),
     industry: r.best?.industry || '',
     industry_reason: r.best?.industryReason || '',
+    person_function: r.best?.personFunction || '',
+    person_profile: r.best?.personProfile || '',
     company_profile: r.best?.companyProfile || '',
     sector: r.best?.sector || '',
     best_report: r.best?.report?.title || '',
@@ -186,6 +190,7 @@ export default function Page() {
               <th>Prospect</th>
               <th>Company (researched)</th>
               <th>Industry (domain)</th>
+              <th>Contact (role)</th>
               <th>Best report</th>
             </tr>
           </thead>
@@ -208,6 +213,16 @@ export default function Page() {
                     <div className="report">
                       <span className="badge b-still">{r.best.industry}</span>
                       {r.best.industryReason && <div className="why">{r.best.industryReason}</div>}
+                    </div>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td>
+                  {r.best?.personFunction || r.best?.personProfile ? (
+                    <div className="report">
+                      {r.best?.personFunction && <span className="badge b-left">{r.best.personFunction}</span>}
+                      {r.best?.personProfile && <div className="why">{r.best.personProfile}</div>}
                     </div>
                   ) : (
                     <span className="muted">—</span>
