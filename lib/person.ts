@@ -105,3 +105,56 @@ export async function profilePerson(
     return profile;
   }
 }
+
+// --- Optional: real web research on the person --------------------------------
+// This mirrors what a manual ChatGPT lookup does. It uses OpenAI's search-enabled
+// model to find the contact on public professional sources and returns a short
+// bio, which profilePerson() then distils into a function label via its `extra`
+// slot. It runs on the SAME OPENAI_API_KEY — no extra vendor. It is OFF unless
+// PERSON_WEB_RESEARCH=1, because the web-search tool adds a per-query fee on top
+// of normal token cost. Any failure returns '' so the caller falls back to the
+// title-based inference and never breaks.
+const PERSON_SEARCH_MODEL = process.env.PERSON_SEARCH_MODEL || 'gpt-4o-mini-search-preview';
+
+export async function researchPersonWeb(p: Partial<Prospect>): Promise<string> {
+  const name = `${p.firstName || ''} ${p.lastName || ''}`.trim();
+  if (!name || !p.companyName) return ''; // need at least a name + employer to search
+  const domain = (p.companyWebsite || '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/.*$/, '');
+
+  // Pin the exact person with their LinkedIn URL when we have it (most reliable
+  // identifier), and pass the sheet's designation as a stated hint to verify.
+  const li = (p.linkedin || '').trim();
+  const liUrl = li ? (/^https?:\/\//i.test(li) ? li : `https://${li.replace(/^\/+/, '')}`) : '';
+  const designation = (p.title || '').trim();
+
+  const q =
+    `Research this specific person from public professional sources` +
+    (liUrl ? `, primarily their LinkedIn profile at ${liUrl}` : '') +
+    `.\n` +
+    `Name: ${name}\n` +
+    `Company on record: ${p.companyName}${domain ? ` (${domain})` : ''}\n` +
+    (designation ? `Job title on record: ${designation}\n` : '') +
+    `\nVerify where they CURRENTLY work and what they do. Report their current employer, current ` +
+    `job title, seniority, and the business function/area they work in (e.g. Human Resources, Finance, ` +
+    `IT / Engineering, Sales, Operations). If their current employer differs from the company on ` +
+    `record, state the difference explicitly. Answer in 2-4 sentences. If you cannot confirm this ` +
+    `specific person, reply exactly: No public information found.`;
+
+  try {
+    // search-preview models take a single user turn; no temperature / JSON mode.
+    const params: any = {
+      model: PERSON_SEARCH_MODEL,
+      web_search_options: {},
+      messages: [{ role: 'user', content: q }],
+    };
+    const r = await openai.chat.completions.create(params);
+    const text = (r.choices?.[0]?.message?.content || '').trim();
+    if (!text || /no public information found/i.test(text)) return '';
+    return text;
+  } catch {
+    return ''; // fall back to title-based inference
+  }
+}
