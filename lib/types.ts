@@ -22,6 +22,7 @@ export interface ReportItem {
   slug: string;      // "regtech-market-for-financial-crime-compliance"
   title: string;     // prettified slug
   url: string;       // full report URL
+  industry?: string; // one of the 12 canonical industries (see lib/industries.ts)
   embedding?: number[]; // present in the built catalog.json
 }
 
