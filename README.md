@@ -80,12 +80,23 @@ The catalog build accepts two optional env vars:
 | `CRAWL_INDUSTRIES` | `1` | Set to `0` to skip the category-page crawl and tag **every** report by embedding only (faster build, slightly less authoritative). |
 | `MAX_CATEGORY_PAGES` | `60` | Pagination ceiling per category page; the crawl stops early once a page adds no new report IDs. |
 
+To research each prospect on the web (like a manual ChatGPT lookup) instead of inferring their role
+from the sheet, set one env var — it runs on the **same OpenAI key**:
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `PERSON_WEB_RESEARCH` | `0` | Set to `1` to look each contact up via OpenAI's search model and feed the real bio into matching. Adds a per-query search fee (~$25 / 1,000 prospects) on top of tokens. |
+| `PERSON_SEARCH_MODEL` | `gpt-4o-mini-search-preview` | Which search-enabled model performs the lookup. |
+
 Paste your sheet (the exact headers below, tab- or comma-separated) and click **Match reports**
 or **Verify + match**.
 
 ```
 firstName  lastName  title  companyName  companyWebsite  department  level  industry  subIndustry  country  email  linkedin
 ```
+
+Column names are matched loosely, so common variants work without renaming — e.g. `Designation`
+maps to `title`, and `linkedin_profile` maps to `linkedin`.
 
 ## Deploy to Vercel
 
@@ -117,15 +128,19 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
   one bucket and the shortlist is **hard-filtered** to it before re-ranking. The 12 industries live
   in `data/industries.json` (the single source of truth); tweak their descriptions/keywords there to
   steer classification. Aliases (e.g. *consulting → ICT-IOT*) live in `lib/industries.ts`.
-- **Person profiling (implemented).** `lib/person.ts` infers the contact's function from their
-  **name + title + department + seniority** so the matched report fits the buyer's role, not just the
-  employer's industry. This is a *reasoned inference from the sheet*, not LinkedIn scraping (serverless
-  can't, and it breaks LinkedIn's terms — see above). The name is passed as context but the model is
-  told not to fabricate facts it can't infer, so the **title is the reliable signal** — the richer your
-  title/department columns, the sharper the profile. To get true web-sourced depth (like a manual
-  ChatGPT + people-data lookup), pass a provider's bio/title into `profilePerson(..., extra)`: the
-  `extra` slot is built for exactly that, and the **Verify + match** path (`lib/verify.ts`) is the
-  natural place to fetch it (Apollo, People Data Labs, Cognism, or a SERP snippet by name + company).
+- **Person profiling (implemented).** `lib/person.ts` works out the contact's function so the matched
+  report fits the buyer's role, not just the employer's industry. Two modes:
+  - *Inference (default, free):* reasons from the **name + title + department + seniority** already in
+    the sheet. The richer your title/department columns, the sharper it gets; with no title it stays
+    blank rather than inventing one.
+  - *Web research (`PERSON_WEB_RESEARCH=1`):* actually looks the person up on public sources via
+    OpenAI's search model — the same thing a manual ChatGPT lookup does. When the sheet has a
+    **LinkedIn URL** it leads with that to pin the exact person and verify their *current* employer and
+    role, using the sheet's **Designation** as a stated hint, then distils the real bio into a function
+    label (and flags it if their current employer differs from the sheet). Runs on the **same OpenAI
+    key** (no extra vendor); adds a per-query search fee.
+  Either way the result also feeds `profilePerson(..., extra)`, so you can additionally pipe in a
+  people-data provider's bio (Apollo, People Data Labs, Cognism) for even more signal.
 - **Shortlist size (`k`).** Raise to 40 for broad roles, drop to 15 for niche ones.
 - **Embed richer text.** Optionally fetch each report's full "By segment" title for more signal
   (costs more at build time, not at query time).
