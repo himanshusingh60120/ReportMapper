@@ -257,15 +257,16 @@ async function pickBest(
   };
 }
 
-export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch> {
+export async function bestReportFor(raw: Record<string, any>, webResearch?: boolean): Promise<BestMatch> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   // 1) Fix the domain: bucket the company into one of the 12 industries.
   const pick = await classifyIndustry(p, profile);
-  // 1b) Profile the PERSON. When PERSON_WEB_RESEARCH=1, first research them on
-  //     the web (like a manual ChatGPT lookup) and feed that bio in; otherwise
-  //     infer from the title/dept already in the sheet.
-  const webBio = process.env.PERSON_WEB_RESEARCH === '1' ? await researchPersonWeb(p) : '';
+  // 1b) Profile the PERSON. Web research (LinkedIn-led) is opt-in: the per-run
+  //     `webResearch` flag wins if provided, else the PERSON_WEB_RESEARCH env
+  //     default. Off → infer from the Designation/title already in the sheet.
+  const useWeb = webResearch ?? (process.env.PERSON_WEB_RESEARCH === '1');
+  const webBio = useWeb ? await researchPersonWeb(p) : '';
   const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector }, webBio);
   // 2) Dig deeper: shortlist + re-rank reports *within* that bucket, role-aware.
   const cands = await shortlist(p, profile, 25, pick.industry.name, person);
