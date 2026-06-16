@@ -58,6 +58,7 @@ export default function Page() {
   const [text, setText] = useState(SAMPLE);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
+  const [webResearch, setWebResearch] = useState(false);
   const [err, setErr] = useState('');
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [liveName, setLiveName] = useState('');
@@ -107,7 +108,7 @@ export default function Page() {
         const res = await fetch('/api/match', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prospects: batch }),
+          body: JSON.stringify({ prospects: batch, webResearch }),
         });
         const body = await res.text();
         let data: any;
@@ -172,7 +173,23 @@ export default function Page() {
         <label className="muted" style={{ cursor: 'pointer' }}>
           or upload CSV <input type="file" accept=".csv,.tsv,.txt" onChange={onFile} hidden />
         </label>
+        <label className="muted" style={{ cursor: 'pointer', marginLeft: 'auto' }} title="Looks each prospect up on the web (LinkedIn-led) to verify their current role. ~$0.025 per prospect. Off = free, infers from the Designation column.">
+          <input
+            type="checkbox"
+            checked={webResearch}
+            onChange={(e) => setWebResearch(e.target.checked)}
+            disabled={loading}
+            style={{ marginRight: 6 }}
+          />
+          Deep web research (paid)
+        </label>
       </div>
+
+      {webResearch && (
+        <p className="muted" style={{ marginTop: -8 }}>
+          ● Web research on — verifies each prospect via LinkedIn/public sources (~$0.025 each). Uncheck to use free Designation-based inference.
+        </p>
+      )}
 
       {progress.total > 0 && (
         <p className="muted" style={{ marginTop: -8 }}>
