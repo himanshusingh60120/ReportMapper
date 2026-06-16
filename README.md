@@ -61,6 +61,11 @@ The chosen industry, the **contact's inferred function**, and the model's one-li
 surfaced in the results table and **exported as CSV columns** (`industry`, `industry_reason`,
 `person_function`, `person_profile`) alongside the company profile and matched report.
 
+You can export results two ways: **Download CSV** (one flat file) or **Download Excel**, which writes
+a single `.xlsx` workbook with a **Master** tab containing every prospect plus **one tab per industry**
+(only the domains that have matches) for easy segregation. Both exports also carry the contact's
+`designation`, `phone`, and `linkedin` so the per-domain sheets are ready for outreach.
+
 ## Setup
 
 ```bash
@@ -168,7 +173,7 @@ lib/match.ts     classify industry → profile person → filter to bucket → r
 lib/verify.ts    boolean SERP query + GPT employment judgment (pluggable)
 app/api/match    POST prospects → report matches
 app/api/enrich   POST prospects → verify + (re)match
-app/page.tsx     paste/upload UI, results table (+ industry badge), CSV download
+app/page.tsx     paste/upload UI, results table (+ industry badge), CSV + multi-tab Excel export
 scripts/build-catalog.mjs   builds data/catalog.json (sitemap + category crawl + industry tagging)
 scripts/test-logic.mjs      offline regression tests for the build/match helpers
 ```
