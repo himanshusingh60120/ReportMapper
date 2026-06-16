@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 
 type Prospect = Record<string, string>;
 type Best = {
@@ -34,24 +35,68 @@ const get = (p: Prospect, ...keys: string[]) => {
 };
 const confClass = (c: number) => (c >= 75 ? 'b-still' : c >= 50 ? 'b-left' : 'b-unknown');
 
-function buildCsv(data: Row[]): string {
-  const flat = data.map((r) => ({
+// One row per prospect, shared by the CSV and the Excel export so columns stay
+// identical. Enriched with the original contact fields (designation, phone,
+// linkedin) so the segregated sheets are ready for outreach.
+function flatten(data: Row[]) {
+  return data.map((r) => ({
     first_name: get(r.prospect, 'first_name', 'firstName'),
     last_name: get(r.prospect, 'last_name', 'lastName'),
+    designation: get(r.prospect, 'Designation', 'designation', 'title', 'job_title', 'jobTitle', 'position'),
     company: get(r.prospect, 'company_name', 'companyName'),
     email: get(r.prospect, 'email'),
+    phone: get(r.prospect, 'phone_number', 'phone', 'phoneNumber'),
+    linkedin: get(r.prospect, 'linkedin_profile', 'linkedin', 'linkedinProfile', 'linkedin_url'),
     industry: r.best?.industry || '',
-    industry_reason: r.best?.industryReason || '',
     person_function: r.best?.personFunction || '',
     person_profile: r.best?.personProfile || '',
-    company_profile: r.best?.companyProfile || '',
-    sector: r.best?.sector || '',
     best_report: r.best?.report?.title || '',
     report_url: r.best?.report?.url || '',
     confidence: r.best?.confidence ?? '',
     reasoning: r.best?.reasoning || '',
+    industry_reason: r.best?.industryReason || '',
+    company_profile: r.best?.companyProfile || '',
+    sector: r.best?.sector || '',
   }));
-  return Papa.unparse(flat);
+}
+
+function buildCsv(data: Row[]): string {
+  return Papa.unparse(flatten(data));
+}
+
+// Excel sheet names: <=31 chars, none of \ / ? * [ ] :, and unique in the book.
+function safeSheetName(name: string, used: Set<string>): string {
+  const base = (name || 'Unknown').replace(/[\\/?*[\]:]/g, ' ').trim().slice(0, 31) || 'Unknown';
+  let nm = base;
+  let i = 2;
+  while (used.has(nm.toLowerCase())) {
+    const suffix = ` (${i})`;
+    nm = base.slice(0, 31 - suffix.length) + suffix;
+    i++;
+  }
+  used.add(nm.toLowerCase());
+  return nm;
+}
+
+// One workbook: a "Master" tab with every prospect, then one tab per industry
+// (only those that actually have prospects) for easy segregation by domain.
+function buildWorkbook(data: Row[]): XLSX.WorkBook {
+  const flat = flatten(data);
+  const wb = XLSX.utils.book_new();
+  const used = new Set<string>();
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(flat), safeSheetName('Master', used));
+
+  const byIndustry = new Map<string, ReturnType<typeof flatten>>();
+  for (const row of flat) {
+    const key = row.industry || 'Unclassified';
+    if (!byIndustry.has(key)) byIndustry.set(key, []);
+    byIndustry.get(key)!.push(row);
+  }
+  for (const key of Array.from(byIndustry.keys()).sort()) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byIndustry.get(key)!), safeSheetName(key, used));
+  }
+  return wb;
 }
 
 export default function Page() {
@@ -143,6 +188,10 @@ export default function Page() {
     a.click();
   }
 
+  function downloadXlsx() {
+    XLSX.writeFile(buildWorkbook(rows), 'matched-prospects-by-domain.xlsx');
+  }
+
   return (
     <div className="wrap">
       <h1>Prospect → Report Matcher</h1>
@@ -161,6 +210,11 @@ export default function Page() {
         {rows.length > 0 && (
           <button className="secondary" onClick={downloadCsv}>
             Download CSV ({rows.length})
+          </button>
+        )}
+        {rows.length > 0 && (
+          <button className="secondary" onClick={downloadXlsx}>
+            Download Excel — Master + 12 domains
           </button>
         )}
         {!liveName ? (
