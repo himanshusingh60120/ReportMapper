@@ -133,12 +133,14 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
   - *Inference (default, free):* reasons from the **name + title + department + seniority** already in
     the sheet. The richer your title/department columns, the sharper it gets; with no title it stays
     blank rather than inventing one.
-  - *Web research (`PERSON_WEB_RESEARCH=1`):* actually looks the person up on public sources via
+  - *Web research (opt-in):* actually looks the person up on public sources via
     OpenAI's search model — the same thing a manual ChatGPT lookup does. When the sheet has a
     **LinkedIn URL** it leads with that to pin the exact person and verify their *current* employer and
     role, using the sheet's **Designation** as a stated hint, then distils the real bio into a function
     label (and flags it if their current employer differs from the sheet). Runs on the **same OpenAI
-    key** (no extra vendor); adds a per-query search fee.
+    key** (no extra vendor); adds a per-query search fee (~$0.025/prospect). Toggle it **per run** with
+    the *Deep web research* checkbox in the UI (no redeploy), or set the default with the
+    `PERSON_WEB_RESEARCH` env var (`1` on / `0` off). Off → free Designation-based inference.
   Either way the result also feeds `profilePerson(..., extra)`, so you can additionally pipe in a
   people-data provider's bio (Apollo, People Data Labs, Cognism) for even more signal.
 - **Shortlist size (`k`).** Raise to 40 for broad roles, drop to 15 for niche ones.
