@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { ReportItem, ReportMatch, Prospect } from './types';
 import { embed, cosine, openai, CHAT_MODEL } from './openai';
 import { profileCompany, CompanyProfile } from './profile';
-import { profilePerson, PersonProfile } from './person';
+import { profilePerson, researchPersonWeb, PersonProfile } from './person';
 import { INDUSTRIES, industryMenu, resolveIndustry, type Industry } from './industries';
 
 let CATALOG: ReportItem[] | null = null;
@@ -34,7 +34,7 @@ export function normalizeProspect(raw: Record<string, any>): Partial<Prospect> {
   return {
     firstName: pick(raw, 'firstName', 'first_name', 'fname'),
     lastName: pick(raw, 'lastName', 'last_name', 'lname'),
-    title: pick(raw, 'title', 'jobTitle', 'job_title', 'position'),
+    title: pick(raw, 'title', 'designation', 'jobTitle', 'job_title', 'position', 'role', 'jobRole'),
     companyName: pick(raw, 'companyName', 'company_name', 'company', 'organization'),
     companyWebsite: pick(raw, 'companyWebsite', 'company_website', 'website', 'domain'),
     department: pick(raw, 'department'),
@@ -262,9 +262,11 @@ export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   // 1) Fix the domain: bucket the company into one of the 12 industries.
   const pick = await classifyIndustry(p, profile);
-  // 1b) Profile the PERSON (name + title + dept + seniority) so the match fits
-  //     what THIS contact actually does, not just their employer's industry.
-  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector });
+  // 1b) Profile the PERSON. When PERSON_WEB_RESEARCH=1, first research them on
+  //     the web (like a manual ChatGPT lookup) and feed that bio in; otherwise
+  //     infer from the title/dept already in the sheet.
+  const webBio = process.env.PERSON_WEB_RESEARCH === '1' ? await researchPersonWeb(p) : '';
+  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector }, webBio);
   // 2) Dig deeper: shortlist + re-rank reports *within* that bucket, role-aware.
   const cands = await shortlist(p, profile, 25, pick.industry.name, person);
   if (!cands.length)
@@ -286,7 +288,8 @@ export async function matchProspect(raw: Record<string, any>, topN = 3): Promise
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   const pick = await classifyIndustry(p, profile);
-  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector });
+  const webBio = process.env.PERSON_WEB_RESEARCH === '1' ? await researchPersonWeb(p) : '';
+  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector }, webBio);
   const cands = await shortlist(p, profile, 25, pick.industry.name, person);
   return cands.slice(0, topN).map((c) => ({
     report: { id: c.report.id, title: c.report.title, url: c.report.url },
