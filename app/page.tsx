@@ -10,6 +10,8 @@ type Best = {
   reasoning: string;
   companyProfile: string;
   sector: string;
+  industry: string;
+  industryReason?: string;
 };
 type Row = { prospect: Prospect; best: Best | null; error?: string };
 
@@ -36,6 +38,8 @@ function buildCsv(data: Row[]): string {
     last_name: get(r.prospect, 'last_name', 'lastName'),
     company: get(r.prospect, 'company_name', 'companyName'),
     email: get(r.prospect, 'email'),
+    industry: r.best?.industry || '',
+    industry_reason: r.best?.industryReason || '',
     company_profile: r.best?.companyProfile || '',
     sector: r.best?.sector || '',
     best_report: r.best?.report?.title || '',
@@ -181,6 +185,7 @@ export default function Page() {
             <tr>
               <th>Prospect</th>
               <th>Company (researched)</th>
+              <th>Industry (domain)</th>
               <th>Best report</th>
             </tr>
           </thead>
@@ -197,6 +202,16 @@ export default function Page() {
                 <td>
                   <div>{r.best?.companyProfile || '—'}</div>
                   {r.best?.sector && <div className="muted" style={{ marginTop: 4 }}>{r.best.sector}</div>}
+                </td>
+                <td>
+                  {r.best?.industry ? (
+                    <div className="report">
+                      <span className="badge b-still">{r.best.industry}</span>
+                      {r.best.industryReason && <div className="why">{r.best.industryReason}</div>}
+                    </div>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
                 </td>
                 <td>
                   {r.error && <span style={{ color: '#b91c1c' }}>{r.error}</span>}
