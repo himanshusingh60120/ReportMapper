@@ -6,12 +6,12 @@ export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
-    const { prospects } = await req.json();
+    const { prospects, webResearch } = await req.json();
     const list: Record<string, any>[] = Array.isArray(prospects) ? prospects : [prospects];
     const results = await Promise.all(
       list.map(async (p) => {
         try {
-          return { prospect: p, best: await bestReportFor(p) };
+          return { prospect: p, best: await bestReportFor(p, webResearch === true) };
         } catch (e: any) {
           return { prospect: p, best: null, error: e.message };
         }
