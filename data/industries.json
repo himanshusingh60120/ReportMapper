@@ -1,0 +1,98 @@
+[
+  {
+    "id": 1,
+    "name": "Food and Beverages",
+    "slug": "food-and-beverages-1",
+    "url": "https://www.kingsresearch.com/reports/food-and-beverages-1",
+    "description": "Food processing and beverages: packaged and processed foods, dairy, bakery, confectionery, snacks, alcoholic and non-alcoholic drinks, food ingredients, additives, flavors, nutrition and dietary products, foodservice and restaurants, and food packaging.",
+    "keywords": ["food", "beverage", "dairy", "bakery", "confectionery", "snacks", "drinks", "ingredients", "flavors", "nutrition", "brewing", "foodservice"]
+  },
+  {
+    "id": 2,
+    "name": "Agriculture",
+    "slug": "agriculture-2",
+    "url": "https://www.kingsresearch.com/reports/agriculture-2",
+    "description": "Agriculture and farming: crop production, seeds, fertilizers, agrochemicals, pesticides, irrigation, agricultural and farm equipment, livestock and animal husbandry, aquaculture, soil and greenhouse technology, precision agriculture and agtech.",
+    "keywords": ["agriculture", "farming", "crop", "seeds", "fertilizer", "agrochemical", "pesticide", "irrigation", "livestock", "aquaculture", "agtech", "soil"]
+  },
+  {
+    "id": 3,
+    "name": "Healthcare Medical Devices Biotechnology",
+    "slug": "healthcare-medical-devices-biotechnology-3",
+    "url": "https://www.kingsresearch.com/reports/healthcare-medical-devices-biotechnology-3",
+    "description": "Healthcare, medical devices and biotechnology: pharmaceuticals and drugs, biopharma and life sciences, therapeutics, vaccines, diagnostics, medical devices and equipment, surgical instruments, hospitals and healthcare providers, clinical services, genomics and patient care.",
+    "keywords": ["healthcare", "pharmaceutical", "drug", "biotech", "biopharma", "medical device", "diagnostics", "clinical", "hospital", "therapeutics", "vaccine", "life sciences", "genomics", "surgical"]
+  },
+  {
+    "id": 4,
+    "name": "Consumer Goods",
+    "slug": "consumer-goods-4",
+    "url": "https://www.kingsresearch.com/reports/consumer-goods-4",
+    "description": "Consumer goods and retail: fast-moving consumer goods (FMCG), apparel and footwear, cosmetics, beauty and personal care, household and home-care products, furniture, toys, durable and non-durable consumer products, consumer brands, retail and e-commerce, and consumer packaging.",
+    "keywords": ["consumer goods", "retail", "fmcg", "apparel", "footwear", "cosmetics", "beauty", "personal care", "household", "furniture", "toys", "e-commerce", "packaging", "luxury"]
+  },
+  {
+    "id": 5,
+    "name": "Advanced Materials and Chemicals",
+    "slug": "advanced-materials-and-chemicals-5",
+    "url": "https://www.kingsresearch.com/reports/advanced-materials-and-chemicals-5",
+    "description": "Advanced materials and chemicals: specialty and commodity chemicals, petrochemicals, polymers and plastics, resins, coatings, paints, adhesives and sealants, composites, advanced and nanomaterials, catalysts, industrial gases, and chemical manufacturing.",
+    "keywords": ["chemical", "materials", "polymer", "plastic", "resin", "coating", "paint", "adhesive", "composite", "nanomaterial", "catalyst", "petrochemical", "industrial gas", "specialty chemical"]
+  },
+  {
+    "id": 6,
+    "name": "Aerospace and Defense",
+    "slug": "aerospace-and-defense-6",
+    "url": "https://www.kingsresearch.com/reports/aerospace-and-defense-6",
+    "description": "Aerospace and defense: commercial and military aircraft, aviation, airlines and MRO, space, satellites and launch systems, avionics, defense and military systems, missiles, naval and land defense, unmanned aerial vehicles and drones, and homeland security.",
+    "keywords": ["aerospace", "aviation", "aircraft", "airline", "space", "satellite", "avionics", "defense", "military", "missile", "drone", "uav", "naval", "homeland security"]
+  },
+  {
+    "id": 7,
+    "name": "Semiconductor and Electronics",
+    "slug": "semiconductor-and-electronics-7",
+    "url": "https://www.kingsresearch.com/reports/semiconductor-and-electronics-7",
+    "description": "Semiconductors and electronics: integrated circuits and chips, semiconductor fabrication, foundries and wafers, memory, sensors, displays, optoelectronics, printed circuit boards, electronic components, and consumer and industrial electronics hardware.",
+    "keywords": ["semiconductor", "chip", "integrated circuit", "wafer", "foundry", "sensor", "display", "pcb", "electronics", "memory", "optoelectronics", "components", "fabrication"]
+  },
+  {
+    "id": 8,
+    "name": "Energy and Power",
+    "slug": "energy-and-power-8",
+    "url": "https://www.kingsresearch.com/reports/energy-and-power-8",
+    "description": "Energy and power: oil and gas, renewable energy, solar, wind, hydrogen, nuclear and conventional power generation, electricity utilities and the grid, batteries and energy storage, fuels, and power transmission and distribution.",
+    "keywords": ["energy", "power", "oil", "gas", "renewable", "solar", "wind", "hydrogen", "nuclear", "utility", "grid", "battery", "energy storage", "fuel", "electricity"]
+  },
+  {
+    "id": 9,
+    "name": "Machinery Equipment-Construction",
+    "slug": "machinery-equipment-construction-9",
+    "url": "https://www.kingsresearch.com/reports/machinery-equipment-construction-9",
+    "description": "Machinery, equipment and construction: industrial machinery, heavy and construction equipment, manufacturing and factory automation hardware, building and construction, infrastructure, building materials, cement, HVAC, pumps, valves, tools, and industrial engineering.",
+    "keywords": ["machinery", "equipment", "construction", "industrial machinery", "heavy equipment", "infrastructure", "building materials", "cement", "hvac", "pump", "valve", "manufacturing", "engineering", "automation"]
+  },
+  {
+    "id": 10,
+    "name": "Automotive and Transportation",
+    "slug": "automotive-and-transportation-10",
+    "url": "https://www.kingsresearch.com/reports/automotive-and-transportation-10",
+    "description": "Automotive and transportation: passenger and commercial vehicles, electric vehicles, automotive components and parts, tires, mobility services, autonomous driving, logistics and supply chain, freight, rail, shipping and maritime, trucking and fleet, and transportation infrastructure.",
+    "keywords": ["automotive", "vehicle", "car", "electric vehicle", "ev", "auto parts", "tire", "mobility", "autonomous", "logistics", "freight", "rail", "shipping", "trucking", "transportation", "fleet"]
+  },
+  {
+    "id": 11,
+    "name": "BFSI",
+    "slug": "bfsi-11",
+    "url": "https://www.kingsresearch.com/reports/bfsi-11",
+    "description": "Banking, financial services and insurance (BFSI): retail and corporate banking, digital banking, payments and digital payments, lending and credit, fintech, wealth and asset management, capital markets, insurance and insurtech, reinsurance, regtech, and risk, fraud and compliance.",
+    "keywords": ["bfsi", "banking", "financial services", "insurance", "fintech", "payments", "lending", "credit", "wealth management", "asset management", "capital markets", "insurtech", "reinsurance", "regtech", "risk", "compliance"]
+  },
+  {
+    "id": 12,
+    "name": "ICT-IOT",
+    "slug": "ict-iot-12",
+    "url": "https://www.kingsresearch.com/reports/ict-iot-12",
+    "description": "Information and communications technology and IoT: enterprise software and SaaS, cloud computing, cybersecurity, artificial intelligence and data analytics, big data, IT services and consulting, digital transformation, the Internet of Things, connectivity, networking, telecom, and data centers.",
+    "keywords": ["ict", "iot", "software", "saas", "cloud", "cybersecurity", "artificial intelligence", "ai", "data analytics", "big data", "it services", "consulting", "digital transformation", "internet of things", "telecom", "networking", "data center", "platform"]
+  }
+]
