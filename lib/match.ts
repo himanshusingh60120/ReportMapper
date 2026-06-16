@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ReportItem, ReportMatch, Prospect } from './types';
 import { embed, cosine, openai, CHAT_MODEL } from './openai';
 import { profileCompany, CompanyProfile } from './profile';
+import { profilePerson, PersonProfile } from './person';
 import { INDUSTRIES, industryMenu, resolveIndustry, type Industry } from './industries';
 
 let CATALOG: ReportItem[] | null = null;
@@ -54,6 +55,8 @@ export interface BestMatch {
   sector: string;
   industry: string;        // one of the 12 canonical industries the prospect was bucketed into
   industryReason: string;  // short note on why that bucket was chosen
+  personProfile: string;   // what THIS contact most likely does (inferred from title/dept/level)
+  personFunction: string;  // short function label, e.g. "Human Resources / Talent"
 }
 
 function roleText(p: Partial<Prospect>): string {
@@ -68,7 +71,8 @@ async function shortlist(
   p: Partial<Prospect>,
   profile: CompanyProfile,
   k = 25,
-  industryName?: string
+  industryName?: string,
+  person?: PersonProfile
 ): Promise<{ report: ReportItem; similarity: number }[]> {
   const cat = loadCatalog();
   const dims = cat[0]?.embedding?.length;
@@ -81,11 +85,16 @@ async function shortlist(
     if (inBucket.length > 0) pool = inBucket;
   }
 
+  // Query blends what the COMPANY does with what THIS PERSON does, so within the
+  // bucket the reports relevant to the buyer's own function rank higher.
   const q = [
     profile.summary && `Company does: ${profile.summary}`,
     profile.sector && `Sector: ${profile.sector}`,
     p.companyName && `Company: ${p.companyName}`,
-    p.title && `Role: ${p.title}`,
+    person?.function && `Buyer function: ${person.function}`,
+    person?.summary && `Buyer does: ${person.summary}`,
+    person?.interests && `Buyer cares about: ${person.interests}`,
+    !person?.function && p.title && `Role: ${p.title}`,
     p.country && `Location: ${p.country}`,
   ]
     .filter(Boolean)
@@ -192,23 +201,33 @@ async function pickBest(
   p: Partial<Prospect>,
   profile: CompanyProfile,
   cands: { report: ReportItem; similarity: number }[],
-  pick: IndustryPick
+  pick: IndustryPick,
+  person: PersonProfile
 ): Promise<BestMatch> {
   const list = cands.map((c, i) => `${i + 1}. ${c.report.title}`).join('\n');
+  // Prefer the inferred person profile; fall back to the raw title line if we
+  // had nothing person-specific to reason from.
+  const personLines =
+    person.function || person.summary
+      ? `PERSON FUNCTION: ${person.function || 'n/a'}\n` +
+        `WHAT THIS PERSON DOES: ${person.summary || roleText(p)}\n` +
+        `THEY'D PLAUSIBLY CARE ABOUT: ${person.interests || 'n/a'}\n`
+      : `PERSON ROLE: ${roleText(p)}\n`;
   const sys =
     'You are a B2B research analyst. From the candidate market-research reports, pick the SINGLE closest one to ' +
-    "pitch to this buyer, based on what their company does and the person's role. ALWAYS choose the closest match — " +
-    'never refuse. Set confidence to reflect fit: 80-100 for an obvious fit, 50-79 for a reasonable adjacency, ' +
-    '1-49 when only loosely related. Return ONLY JSON.';
+    "pitch to this buyer, weighing BOTH what their company does AND this person's own function/role. ALWAYS choose " +
+    'the closest match — never refuse. Set confidence to reflect fit: 80-100 for an obvious fit, 50-79 for a ' +
+    'reasonable adjacency, 1-49 when only loosely related. Return ONLY JSON.';
   const user =
     `COMPANY: ${p.companyName || 'unknown'}\n` +
     `WHAT THEY DO: ${profile.summary}\n` +
     `SECTOR: ${profile.sector || 'unknown'}\n` +
     `INDUSTRY BUCKET: ${pick.industry.name}\n` +
-    `PERSON ROLE: ${roleText(p)}\n` +
+    personLines +
     `LOCATION: ${p.country || 'unknown'}\n\n` +
     `CANDIDATE REPORTS (all within ${pick.industry.name}):\n${list}\n\n` +
-    `Return JSON: {"n":<closest candidate number 1-${cands.length}>,"confidence":<0-100>,"reasoning":"<=40 words why this is the closest fit"}`;
+    `Pick the report that best fits BOTH the company's industry and THIS PERSON's function.\n` +
+    `Return JSON: {"n":<closest candidate number 1-${cands.length}>,"confidence":<0-100>,"reasoning":"<=40 words why this is the closest fit for this buyer and their role"}`;
 
   const r = await openai.chat.completions.create({
     model: CHAT_MODEL,
@@ -233,6 +252,8 @@ async function pickBest(
     sector: profile.sector,
     industry: pick.industry.name,
     industryReason: pick.reason,
+    personProfile: person.summary,
+    personFunction: person.function,
   };
 }
 
@@ -241,8 +262,11 @@ export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   // 1) Fix the domain: bucket the company into one of the 12 industries.
   const pick = await classifyIndustry(p, profile);
-  // 2) Dig deeper: shortlist + re-rank reports *within* that bucket only.
-  const cands = await shortlist(p, profile, 25, pick.industry.name);
+  // 1b) Profile the PERSON (name + title + dept + seniority) so the match fits
+  //     what THIS contact actually does, not just their employer's industry.
+  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector });
+  // 2) Dig deeper: shortlist + re-rank reports *within* that bucket, role-aware.
+  const cands = await shortlist(p, profile, 25, pick.industry.name, person);
   if (!cands.length)
     return {
       report: null,
@@ -252,15 +276,18 @@ export async function bestReportFor(raw: Record<string, any>): Promise<BestMatch
       sector: profile.sector,
       industry: pick.industry.name,
       industryReason: pick.reason,
+      personProfile: person.summary,
+      personFunction: person.function,
     };
-  return pickBest(p, profile, cands, pick);
+  return pickBest(p, profile, cands, pick, person);
 }
 
 export async function matchProspect(raw: Record<string, any>, topN = 3): Promise<ReportMatch[]> {
   const p = normalizeProspect(raw);
   const profile = await profileCompany(p.companyName || '', p.companyWebsite || '');
   const pick = await classifyIndustry(p, profile);
-  const cands = await shortlist(p, profile, 25, pick.industry.name);
+  const person = await profilePerson(p, { summary: profile.summary, sector: profile.sector });
+  const cands = await shortlist(p, profile, 25, pick.industry.name, person);
   return cands.slice(0, topN).map((c) => ({
     report: { id: c.report.id, title: c.report.title, url: c.report.url },
     score: Math.round(c.similarity * 100),
