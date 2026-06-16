@@ -36,15 +36,19 @@ Report catalog┘   └─ 3. Shortlist (embeddings) ── within bucket ◄─
    industry category pages to tag each report with its industry**, embeds the titles, and writes
    `data/catalog.json`. Reports the crawl doesn't reach are tagged by **nearest-industry embedding**,
    so every report always carries an `industry`.
-2. **Profile + classify:** each prospect's company is profiled by GPT (one line on what it does),
-   then classified into exactly **one** of the 12 industries. A constrained GPT JSON call is the
-   primary classifier; a nearest-industry embedding is the backstop if the model returns something
-   off-menu. Free-text aliases are normalised here (e.g. *consulting / software / IT → ICT-IOT*,
-   *insurance / fintech → BFSI*, *pharma → Healthcare…*).
-3. **Shortlist (within bucket):** the report catalog is **hard-filtered to the chosen industry**,
-   then the prospect query (industry + sub-industry + company + role) is embedded and the top 25
-   reports by cosine similarity are kept. (If a bucket were ever empty, it safely falls back to the
-   full catalog.)
+2. **Profile company + person, then classify:** the prospect's **company** is profiled by GPT (one
+   line on what it does) and classified into exactly **one** of the 12 industries. The **person** is
+   then profiled separately — from their **name, job title, department and seniority** (the columns
+   already in your sheet) GPT infers what *this contact* most likely does day-to-day, the **business
+   function** they sit in (e.g. *Human Resources / Talent*, *Finance / Treasury*, *IT / Engineering*),
+   and the research themes they'd care about. So an HR leader at Accenture and a security architect at
+   Accenture get matched differently even though the company bucket (ICT-IOT) is the same. A constrained
+   GPT JSON call is the primary classifier; a nearest-industry embedding is the backstop. Free-text
+   aliases are normalised here (e.g. *consulting / software / IT → ICT-IOT*, *insurance / fintech → BFSI*).
+3. **Shortlist (within bucket, role-aware):** the report catalog is **hard-filtered to the chosen
+   industry**, then a query blending *what the company does* with *what the person does* is embedded and
+   the top 25 reports by cosine similarity are kept. (If a bucket were ever empty, it safely falls back
+   to the full catalog.)
 4. **Re-rank:** GPT scores those 25 against the buyer and returns the best 3 with a one-line
    reason. Only 25 titles go in the prompt, so cost per prospect stays tiny.
 5. **Verify (optional):** runs a Boolean query — `"First Last" "Company" ("Title")` — through a
@@ -53,8 +57,9 @@ Report catalog┘   └─ 3. Shortlist (embeddings) ── within bucket ◄─
 6. **Re-match on move:** if they left and a new company is found, we re-run the full classify →
    match pipeline on the new employer and keep the old suggestion for reference.
 
-The chosen industry and the model's one-line reason for it are surfaced in the results table and
-**exported as `industry` and `industry_reason` columns** in the CSV.
+The chosen industry, the **contact's inferred function**, and the model's one-line reasons are
+surfaced in the results table and **exported as CSV columns** (`industry`, `industry_reason`,
+`person_function`, `person_profile`) alongside the company profile and matched report.
 
 ## Setup
 
@@ -112,6 +117,15 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
   one bucket and the shortlist is **hard-filtered** to it before re-ranking. The 12 industries live
   in `data/industries.json` (the single source of truth); tweak their descriptions/keywords there to
   steer classification. Aliases (e.g. *consulting → ICT-IOT*) live in `lib/industries.ts`.
+- **Person profiling (implemented).** `lib/person.ts` infers the contact's function from their
+  **name + title + department + seniority** so the matched report fits the buyer's role, not just the
+  employer's industry. This is a *reasoned inference from the sheet*, not LinkedIn scraping (serverless
+  can't, and it breaks LinkedIn's terms — see above). The name is passed as context but the model is
+  told not to fabricate facts it can't infer, so the **title is the reliable signal** — the richer your
+  title/department columns, the sharper the profile. To get true web-sourced depth (like a manual
+  ChatGPT + people-data lookup), pass a provider's bio/title into `profilePerson(..., extra)`: the
+  `extra` slot is built for exactly that, and the **Verify + match** path (`lib/verify.ts`) is the
+  natural place to fetch it (Apollo, People Data Labs, Cognism, or a SERP snippet by name + company).
 - **Shortlist size (`k`).** Raise to 40 for broad roles, drop to 15 for niche ones.
 - **Embed richer text.** Optionally fetch each report's full "By segment" title for more signal
   (costs more at build time, not at query time).
@@ -129,9 +143,11 @@ lawfully. For higher accuracy, swap `serpSearch()` for a compliant B2B data prov
 ```
 data/industries.json   the 12 Kings Research industries (source of truth: names, urls, keywords)
 lib/industries.ts      industry menu + tolerant resolver (aliases, ids, slugs → canonical name)
+lib/profile.ts   profiles the COMPANY (reads the site / infers from name) → summary + sector
+lib/person.ts    profiles the PERSON from name + title + dept → function + interests (inference, not scraping)
 lib/catalog.ts   sitemap → report list (gzip + sitemap-index aware)
 lib/openai.ts    OpenAI client, embeddings, cosine
-lib/match.ts     classify industry → filter to bucket → shortlist + GPT re-rank
+lib/match.ts     classify industry → profile person → filter to bucket → role-aware shortlist + GPT re-rank
 lib/verify.ts    boolean SERP query + GPT employment judgment (pluggable)
 app/api/match    POST prospects → report matches
 app/api/enrich   POST prospects → verify + (re)match
