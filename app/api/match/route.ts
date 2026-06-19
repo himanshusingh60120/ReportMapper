@@ -1,24 +1,37 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { bestReportFor } from '@/lib/match';
+// app/api/match/route.ts
+// Processes ONE batch per invocation and returns. The client (see
+// lib/batch-runner.ts) loops over batches, so a single request never runs long
+// enough to hit FUNCTION_INVOCATION_TIMEOUT.
 
-export const runtime = 'nodejs';
+import { matchBatch, type Prospect } from "../../../lib/match";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// Hobby plan: 60. Vercel Pro: bump to 300 (and raise MAX_BATCH below to ~250).
 export const maxDuration = 60;
 
-export async function POST(req: NextRequest) {
+// Keep batches small enough that even a slow batch finishes well under maxDuration.
+const MAX_BATCH = 150;
+
+export async function POST(req: Request) {
   try {
-    const { prospects, webResearch } = await req.json();
-    const list: Record<string, any>[] = Array.isArray(prospects) ? prospects : [prospects];
-    const results = await Promise.all(
-      list.map(async (p) => {
-        try {
-          return { prospect: p, best: await bestReportFor(p, webResearch === true) };
-        } catch (e: any) {
-          return { prospect: p, best: null, error: e.message };
-        }
-      })
-    );
-    return NextResponse.json({ results });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 400 });
+    const body = await req.json().catch(() => ({}));
+    const prospects: Prospect[] = Array.isArray(body?.prospects) ? body.prospects : [];
+
+    if (prospects.length === 0) {
+      return Response.json({ error: "Send { prospects: Prospect[] }" }, { status: 400 });
+    }
+    if (prospects.length > MAX_BATCH) {
+      return Response.json(
+        { error: `Batch too large (${prospects.length}). Max ${MAX_BATCH} per request.` },
+        { status: 413 }
+      );
+    }
+
+    const results = await matchBatch(prospects);
+    return Response.json({ results });
+  } catch (err: any) {
+    return Response.json({ error: err?.message ?? "match failed" }, { status: 500 });
   }
 }
