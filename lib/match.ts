@@ -1,43 +1,41 @@
 // lib/match.ts
-// Prospect -> report matcher: embed query (SHARED embedder) -> cosine shortlist
-// -> GPT re-rank. Returns `best` in the EXACT shape app/page.tsx reads.
+// Full matching pipeline:
+//   embed query (shared 512-d embedder) -> cosine shortlist -> GPT re-rank,
+//   PLUS company + person profiling so every UI column fills, PLUS an optional
+//   paid web-research / employment-verify pass gated behind the UI toggle.
 //
-// What changed vs. the broken version:
-//   1) Query embeddings now use embed() from ./openai, which requests the SAME
-//      `dimensions` (EMBED_DIMS, default 512) that scripts/build-catalog.mjs used.
-//      The old local embedMany() omitted `dimensions`, so it produced 1536-d
-//      query vectors that could never be compared to the 512-d catalog
-//      (cosine -> NaN -> garbage shortlist).
-//   2) The result `best` is reshaped to match what the UI + CSV export read:
-//      { report:{title,url}, confidence, reasoning, industry, personFunction,
-//        companyProfile, ... } instead of the flat { title,url,score,reason }.
-//   3) Loud guards: an empty catalog or a dimension mismatch now THROW a clear
-//      error (surfaced by the route as a 500) instead of silently returning
-//      "No strong match" for every row.
+// Per prospect (toggle OFF — needs only OPENAI_API_KEY):
+//   1) profileCompany()  -> company_profile + sector   (inferred from name/domain, no fetch)
+//   2) profilePerson()   -> person_profile             (inferred from title/dept/seniority)
+//   3) shortlist + rerank -> best report + confidence + reasoning
+//   person_function stays your sheet "designation" verbatim (unchanged on purpose).
+//
+// Per prospect (toggle ON — "Deep web research (paid)"):
+//   + profileCompany() reads the real company website
+//   + researchPersonWeb() (OpenAI search model) feeds a real bio into the profile
+//   + verifyEmployment() (SerpAPI boolean check) flags likely job changes
+//   These only run when webResearch === true, and each degrades to "" / null if a
+//   key is missing or a call fails — they never break a row.
 
 import { openai, embed, cosine, CHAT_MODEL } from "./openai";
 import { pLimit, retry } from "./concurrency";
+import { profileCompany } from "./profile";
+import { profilePerson, researchPersonWeb, type PersonProfile } from "./person";
+import { verifyEmployment } from "./verify";
 import catalogJson from "../data/catalog.json";
+import type { Prospect } from "./types";
+
+// Re-export so app/api routes can keep importing Prospect from here.
+export type { Prospect };
 
 // ---- config (override via env) ---------------------------------------------
 const SHORTLIST_K = Number(process.env.SHORTLIST_K ?? 25);
 const RERANK_CONCURRENCY = Number(process.env.RERANK_CONCURRENCY ?? 8);
 
 // ---- types -----------------------------------------------------------------
-export interface Prospect {
-  firstName?: string;
-  lastName?: string;
-  title?: string;
-  companyName?: string;
-  companyWebsite?: string;
-  department?: string;
-  level?: string;
-  industry?: string;
-  subIndustry?: string;
-  country?: string;
-  email: string;
-  linkedin?: string;
-  [key: string]: unknown; // tolerate extra CSV columns
+export interface MatchOptions {
+  /** When true, run the paid web-research + employment-verify pass. */
+  webResearch?: boolean;
 }
 
 // Shape written by scripts/build-catalog.mjs.
@@ -54,13 +52,13 @@ export interface CatalogItem {
 export interface ReportMatch {
   report: { title: string; url: string };
   confidence: number; // 0-100 from the re-ranker
-  reasoning: string; // one line: why this report fits
-  industry?: string; // buyer industry (rendered as a badge)
-  industryReason?: string; // optional "why" sub-line
-  personFunction?: string; // buyer role (rendered as a badge)
-  personProfile?: string; // optional "why" sub-line
-  companyProfile?: string; // shown under "Company (researched)"
-  sector?: string; // optional sub-line
+  reasoning: string; // why this report fits
+  industry: string; // buyer industry (badge)
+  industryReason: string; // optional "why" sub-line
+  personFunction: string; // buyer role (badge) — kept as the sheet designation
+  personProfile: string; // what this contact most likely does day-to-day
+  companyProfile: string; // shown under "Company (researched)"
+  sector: string; // short sector label
 }
 
 export interface MatchResult {
@@ -73,6 +71,13 @@ export interface MatchResult {
   best: ReportMatch | null; // matches[0]
   confidence: number; // best?.confidence ?? 0
   error?: string;
+}
+
+// Lightweight intermediate from the re-ranker before person/company context is attached.
+interface RerankPick {
+  report: { title: string; url: string };
+  confidence: number;
+  reasoning: string;
 }
 
 const catalog = catalogJson as unknown as CatalogItem[];
@@ -114,7 +119,12 @@ function shortlist(queryVec: number[], k: number): CatalogItem[] {
     .map((x) => x.item);
 }
 
-async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMatch[]> {
+async function rerank(
+  p: Prospect,
+  candidates: CatalogItem[],
+  person: PersonProfile
+): Promise<RerankPick[]> {
+  if (candidates.length === 0) return [];
   const list = candidates.map((c, i) => `${i}. ${c.title}`).join("\n");
   const system =
     "You are a B2B market-research matching engine. Given a buyer and a numbered " +
@@ -124,8 +134,11 @@ async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMat
     `Buyer:\n` +
     `- Company: ${p.companyName ?? "?"}\n` +
     `- Industry: ${p.industry ?? "?"} / ${p.subIndustry ?? "?"}\n` +
-    `- Role: ${p.title ?? "?"} (level: ${p.level ?? "?"}, dept: ${p.department ?? "?"})\n\n` +
-    `Candidate reports:\n${list}\n\n` +
+    `- Role: ${p.title ?? "?"} (level: ${p.level ?? "?"}, dept: ${p.department ?? "?"})\n` +
+    (person.function ? `- Business function: ${person.function}\n` : "") +
+    (person.interests ? `- Likely research interests: ${person.interests}\n` : "") +
+    (person.summary ? `- About this contact: ${person.summary}\n` : "") +
+    `\nCandidate reports:\n${list}\n\n` +
     `Return JSON shaped exactly as:\n` +
     `{"picks":[{"index":<number from the list>,"confidence":<0-100>,"reason":"<=14 words"}]}\n` +
     `Pick the 3 best, ordered most to least relevant.`;
@@ -150,11 +163,6 @@ async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMat
     picks = [];
   }
 
-  // Report fields come from the matched catalog item; buyer-context fields
-  // (industry, role, company) come straight from the prospect row. The deeper
-  // "researched" fields (sector, companyProfile description, personProfile,
-  // industryReason) are left for the /api/enrich path — the UI renders missing
-  // ones gracefully, so the table stays clean.
   return picks
     .filter((pk) => candidates[pk.index])
     .slice(0, 3)
@@ -164,17 +172,19 @@ async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMat
         report: { title: c.title, url: c.url },
         confidence: clamp(pk.confidence ?? pk.score),
         reasoning: String(pk.reason ?? ""),
-        industry: p.industry || c.industry || "",
-        personFunction: p.title || "",
-        companyProfile: p.companyName || "", // basic value until enrichment is wired
-      } as ReportMatch;
+      };
     });
 }
 
 // ---- public API -------------------------------------------------------------
 
 /** Match a single prospect. Pass a precomputed query vector to skip re-embedding. */
-export async function matchOne(p: Prospect, queryVec?: number[]): Promise<MatchResult> {
+export async function matchOne(
+  p: Prospect,
+  queryVec?: number[],
+  opts: MatchOptions = {}
+): Promise<MatchResult> {
+  const webResearch = opts.webResearch === true;
   const base = {
     email: p.email,
     prospect: p,
@@ -182,11 +192,59 @@ export async function matchOne(p: Prospect, queryVec?: number[]): Promise<MatchR
     industry: [p.industry, p.subIndustry].filter(Boolean).join(" / "),
     role: p.title ?? "",
   };
+
   try {
     const vec = queryVec ?? (await embed([toQuery(p)]))[0];
     assertCatalogReady(vec?.length ?? 0);
+
+    // (1) Company profile. Reads the real site only when deep research is on;
+    //     otherwise infers from the name/domain (no fetch, no per-query fee).
+    const company = await profileCompany(
+      p.companyName ?? "",
+      webResearch ? p.companyWebsite ?? "" : ""
+    );
+
+    // (2) Optional paid web research + employment verification (only when toggled).
+    let extra = "";
+    let verifiedNote = "";
+    if (webResearch) {
+      const [bio, verification] = await Promise.all([
+        researchPersonWeb(p).catch(() => ""),
+        verifyEmployment(p).catch(() => null),
+      ]);
+      if (bio) extra += `Web research on this person: ${bio}\n`;
+      if (verification?.status === "likely_left" && verification.currentCompany) {
+        verifiedNote = `Heads up: may have moved to ${verification.currentCompany}.`;
+        extra +=
+          `Employment check: likely left ${p.companyName ?? ""}; ` +
+          `current employer may be ${verification.currentCompany}.\n`;
+      }
+    }
+
+    // (3) Person profile (cheap GPT inference; sharper when `extra` carries a real bio).
+    const person = await profilePerson(
+      p,
+      { summary: company.summary, sector: company.sector },
+      extra
+    );
+
+    // (4) Shortlist by embedding similarity, then GPT re-rank for the best report.
     const candidates = shortlist(vec, SHORTLIST_K);
-    const matches = await rerank(p, candidates);
+    const picks = await rerank(p, candidates, person);
+
+    // Attach the shared person/company context to every pick.
+    const matches: ReportMatch[] = picks.map((pk) => ({
+      report: pk.report,
+      confidence: pk.confidence,
+      reasoning: pk.reasoning,
+      industry: p.industry ?? "",
+      industryReason: "",
+      personFunction: p.title ?? "", // keep the sheet designation, per request
+      personProfile: [person.summary, verifiedNote].filter(Boolean).join(" "),
+      companyProfile: company.summary || (p.companyName ?? ""),
+      sector: company.sector ?? "",
+    }));
+
     return {
       ...base,
       matches,
@@ -207,17 +265,20 @@ export async function matchOne(p: Prospect, queryVec?: number[]): Promise<MatchR
 /**
  * Match a BATCH. This is what the API route calls.
  *   1) Embed every query together (few requests, correct dimensions).
- *   2) Re-rank concurrently, capped at RERANK_CONCURRENCY, with per-call retries.
+ *   2) Profile + re-rank concurrently, capped at RERANK_CONCURRENCY.
  * An empty catalog or a dimension mismatch throws here (clear 500) rather than
  * degrading every row to a silent "No strong match".
  */
-export async function matchBatch(prospects: Prospect[]): Promise<MatchResult[]> {
+export async function matchBatch(
+  prospects: Prospect[],
+  opts: MatchOptions = {}
+): Promise<MatchResult[]> {
   if (prospects.length === 0) return [];
   const queries = prospects.map(toQuery);
   const vectors = await embed(queries);
   assertCatalogReady(vectors[0]?.length ?? 0);
   const limit = pLimit(RERANK_CONCURRENCY);
-  return Promise.all(prospects.map((p, i) => limit(() => matchOne(p, vectors[i]))));
+  return Promise.all(prospects.map((p, i) => limit(() => matchOne(p, vectors[i], opts))));
 }
 
 // Back-compat: some older imports referenced embedMany from this module.
