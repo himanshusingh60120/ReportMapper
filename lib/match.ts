@@ -1,28 +1,27 @@
 // lib/match.ts
-// Shortlist (embeddings) -> GPT re-rank, with the two scale fixes baked in:
-//   1) embedMany(): embeds a whole batch in a handful of requests, not one per row
-//   2) matchBatch(): re-ranks the batch with a bounded concurrency pool + retries
+// Prospect -> report matcher: embed query (SHARED embedder) -> cosine shortlist
+// -> GPT re-rank. Returns `best` in the EXACT shape app/page.tsx reads.
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// THREE THINGS TO VERIFY AGAINST YOUR ACTUAL CODE (I rebuilt this from the README):
-//   (a) CatalogItem shape — I assume data/catalog.json items look like
-//         { title: string, url: string, embedding: number[] }
-//       If your slugs/urls live under different keys, fix CatalogItem + shortlist().
-//   (b) ./openai exports an `openai` client (the OpenAI SDK instance). If it
-//       default-exports or names it differently, fix the import below.
-//   (c) The MatchResult shape — map these fields to whatever your table/CSV reads.
-// ─────────────────────────────────────────────────────────────────────────────
+// What changed vs. the broken version:
+//   1) Query embeddings now use embed() from ./openai, which requests the SAME
+//      `dimensions` (EMBED_DIMS, default 512) that scripts/build-catalog.mjs used.
+//      The old local embedMany() omitted `dimensions`, so it produced 1536-d
+//      query vectors that could never be compared to the 512-d catalog
+//      (cosine -> NaN -> garbage shortlist).
+//   2) The result `best` is reshaped to match what the UI + CSV export read:
+//      { report:{title,url}, confidence, reasoning, industry, personFunction,
+//        companyProfile, ... } instead of the flat { title,url,score,reason }.
+//   3) Loud guards: an empty catalog or a dimension mismatch now THROW a clear
+//      error (surfaced by the route as a 500) instead of silently returning
+//      "No strong match" for every row.
 
-import { openai } from "./openai";
+import { openai, embed, cosine, CHAT_MODEL } from "./openai";
 import { pLimit, retry } from "./concurrency";
 import catalogJson from "../data/catalog.json";
 
 // ---- config (override via env) ---------------------------------------------
-const EMBED_MODEL = process.env.EMBED_MODEL ?? "text-embedding-3-small";
-const CHAT_MODEL = process.env.CHAT_MODEL ?? "gpt-4o-mini";
 const SHORTLIST_K = Number(process.env.SHORTLIST_K ?? 25);
 const RERANK_CONCURRENCY = Number(process.env.RERANK_CONCURRENCY ?? 8);
-const EMBED_CHUNK = Number(process.env.EMBED_CHUNK ?? 256); // inputs per embeddings request
 
 // ---- types -----------------------------------------------------------------
 export interface Prospect {
@@ -41,28 +40,38 @@ export interface Prospect {
   [key: string]: unknown; // tolerate extra CSV columns
 }
 
+// Shape written by scripts/build-catalog.mjs.
 export interface CatalogItem {
+  id?: string;
+  slug?: string;
   title: string;
   url: string;
+  industry?: string;
   embedding: number[];
 }
 
+// Shaped to match EXACTLY what app/page.tsx (table + CSV export) reads off `best`.
 export interface ReportMatch {
-  title: string;
-  url: string;
-  score: number; // 0–100 confidence from the re-ranker
-  reason: string;
+  report: { title: string; url: string };
+  confidence: number; // 0-100 from the re-ranker
+  reasoning: string; // one line: why this report fits
+  industry?: string; // buyer industry (rendered as a badge)
+  industryReason?: string; // optional "why" sub-line
+  personFunction?: string; // buyer role (rendered as a badge)
+  personProfile?: string; // optional "why" sub-line
+  companyProfile?: string; // shown under "Company (researched)"
+  sector?: string; // optional sub-line
 }
 
 export interface MatchResult {
   email: string;
   prospect: Prospect;
   company: string;
-  industry: string;
+  industry: string; // top-level: kept so the 12-domain Excel split still works
   role: string;
   matches: ReportMatch[]; // top 3
   best: ReportMatch | null; // matches[0]
-  confidence: number; // best?.score ?? 0
+  confidence: number; // best?.confidence ?? 0
   error?: string;
 }
 
@@ -75,22 +84,26 @@ function toQuery(p: Prospect): string {
     .join(" · ");
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
-}
-
 function clamp(n: unknown): number {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(100, Math.round(x)));
+}
+
+// Fail loud and explain, instead of silently returning "No strong match".
+function assertCatalogReady(queryDims: number): void {
+  if (!catalog.length) {
+    throw new Error(
+      "Report catalog is empty. Run `npm run build:catalog` (needs OPENAI_API_KEY) and redeploy."
+    );
+  }
+  const catDims = catalog[0]?.embedding?.length ?? 0;
+  if (catDims !== queryDims) {
+    throw new Error(
+      `Embedding dimension mismatch: query is ${queryDims}-d but catalog is ${catDims}-d. ` +
+        "Set EMBED_DIMS identically for the app and scripts/build-catalog.mjs, then rebuild the catalog."
+    );
+  }
 }
 
 function shortlist(queryVec: number[], k: number): CatalogItem[] {
@@ -99,22 +112,6 @@ function shortlist(queryVec: number[], k: number): CatalogItem[] {
     .sort((a, b) => b.score - a.score)
     .slice(0, k)
     .map((x) => x.item);
-}
-
-/**
- * Embeds many texts in as few requests as possible. This is the single biggest
- * speedup vs. embedding one query per prospect. Output index aligns with input.
- */
-export async function embedMany(texts: string[]): Promise<number[][]> {
-  const out: number[][] = [];
-  for (let i = 0; i < texts.length; i += EMBED_CHUNK) {
-    const slice = texts.slice(i, i + EMBED_CHUNK);
-    const res = await retry(() =>
-      openai.embeddings.create({ model: EMBED_MODEL, input: slice })
-    );
-    for (const d of res.data) out.push(d.embedding as number[]);
-  }
-  return out;
 }
 
 async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMatch[]> {
@@ -130,7 +127,7 @@ async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMat
     `- Role: ${p.title ?? "?"} (level: ${p.level ?? "?"}, dept: ${p.department ?? "?"})\n\n` +
     `Candidate reports:\n${list}\n\n` +
     `Return JSON shaped exactly as:\n` +
-    `{"picks":[{"index":<number from the list>,"score":<0-100 confidence>,"reason":"<=12 words"}]}\n` +
+    `{"picks":[{"index":<number from the list>,"confidence":<0-100>,"reason":"<=14 words"}]}\n` +
     `Pick the 3 best, ordered most to least relevant.`;
 
   const res = await retry(() =>
@@ -146,49 +143,59 @@ async function rerank(p: Prospect, candidates: CatalogItem[]): Promise<ReportMat
   );
 
   const raw = res.choices[0]?.message?.content ?? "{}";
-  let picks: Array<{ index: number; score: number; reason: string }> = [];
+  let picks: Array<{ index: number; confidence?: number; score?: number; reason: string }> = [];
   try {
     picks = JSON.parse(raw)?.picks ?? [];
   } catch {
     picks = [];
   }
 
+  // Report fields come from the matched catalog item; buyer-context fields
+  // (industry, role, company) come straight from the prospect row. The deeper
+  // "researched" fields (sector, companyProfile description, personProfile,
+  // industryReason) are left for the /api/enrich path — the UI renders missing
+  // ones gracefully, so the table stays clean.
   return picks
     .filter((pk) => candidates[pk.index])
     .slice(0, 3)
-    .map((pk) => ({
-      title: candidates[pk.index].title,
-      url: candidates[pk.index].url,
-      score: clamp(pk.score),
-      reason: String(pk.reason ?? ""),
-    }));
+    .map((pk) => {
+      const c = candidates[pk.index];
+      return {
+        report: { title: c.title, url: c.url },
+        confidence: clamp(pk.confidence ?? pk.score),
+        reasoning: String(pk.reason ?? ""),
+        industry: p.industry || c.industry || "",
+        personFunction: p.title || "",
+        companyProfile: p.companyName || "", // basic value until enrichment is wired
+      } as ReportMatch;
+    });
 }
 
 // ---- public API -------------------------------------------------------------
 
 /** Match a single prospect. Pass a precomputed query vector to skip re-embedding. */
 export async function matchOne(p: Prospect, queryVec?: number[]): Promise<MatchResult> {
+  const base = {
+    email: p.email,
+    prospect: p,
+    company: p.companyName ?? "",
+    industry: [p.industry, p.subIndustry].filter(Boolean).join(" / "),
+    role: p.title ?? "",
+  };
   try {
-    const vec = queryVec ?? (await embedMany([toQuery(p)]))[0];
+    const vec = queryVec ?? (await embed([toQuery(p)]))[0];
+    assertCatalogReady(vec?.length ?? 0);
     const candidates = shortlist(vec, SHORTLIST_K);
     const matches = await rerank(p, candidates);
     return {
-      email: p.email,
-      prospect: p,
-      company: p.companyName ?? "",
-      industry: [p.industry, p.subIndustry].filter(Boolean).join(" / "),
-      role: p.title ?? "",
+      ...base,
       matches,
       best: matches[0] ?? null,
-      confidence: matches[0]?.score ?? 0,
+      confidence: matches[0]?.confidence ?? 0,
     };
   } catch (err: any) {
     return {
-      email: p.email,
-      prospect: p,
-      company: p.companyName ?? "",
-      industry: [p.industry, p.subIndustry].filter(Boolean).join(" / "),
-      role: p.title ?? "",
+      ...base,
       matches: [],
       best: null,
       confidence: 0,
@@ -199,15 +206,19 @@ export async function matchOne(p: Prospect, queryVec?: number[]): Promise<MatchR
 
 /**
  * Match a BATCH. This is what the API route calls.
- * 1) Embed every query together (few requests).
- * 2) Re-rank concurrently, capped at RERANK_CONCURRENCY, with per-call retries.
- * A single failed row degrades to a MatchResult with `.error` instead of
- * blowing up the whole batch.
+ *   1) Embed every query together (few requests, correct dimensions).
+ *   2) Re-rank concurrently, capped at RERANK_CONCURRENCY, with per-call retries.
+ * An empty catalog or a dimension mismatch throws here (clear 500) rather than
+ * degrading every row to a silent "No strong match".
  */
 export async function matchBatch(prospects: Prospect[]): Promise<MatchResult[]> {
   if (prospects.length === 0) return [];
   const queries = prospects.map(toQuery);
-  const vectors = await embedMany(queries);
+  const vectors = await embed(queries);
+  assertCatalogReady(vectors[0]?.length ?? 0);
   const limit = pLimit(RERANK_CONCURRENCY);
   return Promise.all(prospects.map((p, i) => limit(() => matchOne(p, vectors[i]))));
 }
+
+// Back-compat: some older imports referenced embedMany from this module.
+export const embedMany = embed;
