@@ -23,10 +23,27 @@ import { profileCompany } from "./profile";
 import { profilePerson, researchPersonWeb, type PersonProfile } from "./person";
 import { verifyEmployment } from "./verify";
 import catalogJson from "../data/catalog.json";
-import type { Prospect } from "./types";
 
-// Re-export so app/api routes can keep importing Prospect from here.
-export type { Prospect };
+// Tolerant Prospect (your CSV headers; extra columns allowed). Kept LOOSE on
+// purpose — optional fields + index signature — so callers like
+// app/api/enrich/route.ts can spread a partial override (companyName) in, and
+// so the profilers in lib/person.ts / lib/verify.ts (which take Partial<Prospect>)
+// accept it. Do not tighten this to the strict type in lib/types.ts.
+export interface Prospect {
+  firstName?: string;
+  lastName?: string;
+  title?: string;
+  companyName?: string;
+  companyWebsite?: string;
+  department?: string;
+  level?: string;
+  industry?: string;
+  subIndustry?: string;
+  country?: string;
+  email: string;
+  linkedin?: string;
+  [key: string]: unknown; // tolerate extra CSV columns
+}
 
 // ---- config (override via env) ---------------------------------------------
 const SHORTLIST_K = Number(process.env.SHORTLIST_K ?? 25);
